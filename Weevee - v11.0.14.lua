@@ -116,6 +116,14 @@ local FRONT_DEHILL_CHANCE = 15;
 -- PlaceFrontMountainField is skipped, so the purge alone can be judged
 -- in-game before the field is layered back on top of a clean slate.
 local DISABLE_FRONT_MOUNTAIN_RIDGES = false;
+-- Bramble's solid, deterministic jungle ring right at the tundra edge (see
+-- BrambleAddJungle). Also used by TongueResourcePlotOk/TongueIsHomePlot to
+-- keep resources out of that ring -- stock passes like AddForestToResource
+-- can still convert a jungle tile to forest for a resource that needs it,
+-- which read as forest patches stabbing into an otherwise solid jungle
+-- band; pushing resource candidates past this ring keeps the ring itself
+-- clean and only lets that happen further out, in the already-wild part.
+local BRAMBLE_JUNGLE_CORE_DEPTH = 3;
 -- Every PlaceFrontMountainField call this attempt records its west-side
 -- columns/opening here, so AuditFrontMountainGaps (post-wonder, west side
 -- only) can re-check rule 3 against the final map -- including Natural
@@ -130,7 +138,7 @@ local SPLIT_WASTELAND = 5;
 local SPLIT_PEAKS = 6;
 local SPLIT_FROSTY = 7;
 local SPLIT_TONGUE = 8;
-local SPLIT_SNAKY = 9;
+local SPLIT_BRAMBLE = 9;
 local SPLIT_RANDOM = 10;
 local BARE_MOUNTAIN_TARGET = 20;
 local SPLIT_MENU_RANDOM = 1; -- Random's dropdown position
@@ -184,7 +192,7 @@ function GetMapScriptInfo()
 					"[COLOR_HIGHLIGHT_TEXT]Oasis[ENDCOLOR]",
 					"[COLOR_HIGHLIGHT_TEXT]Peaky[ENDCOLOR]",
 					"[COLOR_HIGHLIGHT_TEXT]Frosty (WIP)[ENDCOLOR]",
-					"[COLOR_HIGHLIGHT_TEXT]Slate (WIP)[ENDCOLOR]",
+					"[COLOR_HIGHLIGHT_TEXT]Bramble (WIP)[ENDCOLOR]",
 					"[COLOR_HIGHLIGHT_TEXT]Wasteland (WIP)[ENDCOLOR]",
 				},
 				DefaultValue = 1,
@@ -228,7 +236,7 @@ local barrierSplit = SPLIT_SNOW;
 -- before this table is ever consulted.
 local CLIMATE_OPS_TO_SPLIT = {
 	nil, SPLIT_SNOW_V2, SPLIT_TONGUE, SPLIT_WETLAND, SPLIT_DESERT,
-	SPLIT_PEAKS, SPLIT_FROSTY, SPLIT_SNAKY, SPLIT_WASTELAND,
+	SPLIT_PEAKS, SPLIT_FROSTY, SPLIT_BRAMBLE, SPLIT_WASTELAND,
 };
 function ResolveBarrierSplit()
 	if barrierSplitResolved then
@@ -327,7 +335,7 @@ function GetBarrierConfig()
 			-- chaotic ridge, so it gets the narrower default foothill band
 			-- to match (see chaoticMountains' other use sites).
 			chaoticMountains = false,
-			marshBarrierPct = 28,
+			marshBarrierPct = 34,
 			jungleBarrierPct = 0,
 			forestBarrierPct = 22,
 		};
@@ -369,12 +377,17 @@ function GetBarrierConfig()
 			tilted = true,
 		};
 	end
-	if ops == SPLIT_SNAKY then
+	if ops == SPLIT_BRAMBLE then
 		return {
-			kind = "snaky",
+			kind = "bramble",
 			wrap = wrap,
-			mountainPct = 8,
-			hillPct = 22,
+			-- Mountains, hills and water for Bramble are entirely hand-placed
+			-- (AddBrambleLayout/AddBrambleFeatures) rather than rolled from
+			-- these percentages -- zeroed here for self-documentation, not
+			-- functionally load-bearing (Bramble is excluded from the generic
+			-- barrier-percentage painter the same way Slate/Snaky was).
+			mountainPct = 0,
+			hillPct = 0,
 			iceLakePermille = 0,
 			forestPct = 0,
 			oasisPctOfFlat = 0,
@@ -400,7 +413,7 @@ function BarrierTerrainType(cfg)
 	if cfg.kind == "frosty" then
 		return TerrainTypes.TERRAIN_TUNDRA;
 	end
-	if cfg.kind == "tongue" or cfg.kind == "snaky" then
+	if cfg.kind == "tongue" or cfg.kind == "bramble" then
 		return TerrainTypes.TERRAIN_TUNDRA;
 	end
 	return TerrainTypes.TERRAIN_SNOW;
@@ -416,7 +429,7 @@ function BarrierTransitionType(cfg)
 	if cfg.kind == "frosty" then
 		return TerrainTypes.TERRAIN_DESERT;
 	end
-	if cfg.kind == "tongue" or cfg.kind == "snaky" then
+	if cfg.kind == "tongue" or cfg.kind == "bramble" then
 		return TerrainTypes.TERRAIN_TUNDRA;
 	end
 	return TerrainTypes.TERRAIN_TUNDRA;
@@ -618,12 +631,12 @@ end
 ------------------------------------------------------------------------------
 function IsTiltedMirrorAxis()
 	local cfg = GetBarrierConfig();
-	return cfg ~= nil and (cfg.tilted == true or cfg.kind == "snaky");
+	return cfg ~= nil and (cfg.tilted == true or cfg.kind == "bramble");
 end
 ------------------------------------------------------------------------------
-function IsSnaky()
+function IsBramble()
 	local cfg = GetBarrierConfig();
-	return cfg ~= nil and cfg.kind == "snaky";
+	return cfg ~= nil and cfg.kind == "bramble";
 end
 ------------------------------------------------------------------------------
 local tiltedLineReady = false;
@@ -632,16 +645,21 @@ local tiltedShiftReady = false;
 local tiltedShiftEven = 0;
 local tiltedShiftOdd = 0;
 local tongueJungleDepth = nil;
-local snakyFrac = nil;
-local snakyAmp = nil;
+-- Bramble's separator shape: brambleLo[y]/brambleHi[y] are the inclusive
+-- tundra column range at row y, covering every row 0..iH-1. Built once per
+-- attempt by BrambleEnsureShape (see there for the generation algorithm).
+local brambleShapeReady = false;
+local brambleLo = {};
+local brambleHi = {};
 local tongueEconFrac = nil;
 local tongueEconFrac2 = nil;
 function TiltedResetLine()
 	tiltedLineReady = false;
 	tiltedShiftReady = false;
 	tongueJungleDepth = nil;
-	snakyFrac = nil;
-	snakyAmp = nil;
+	brambleShapeReady = false;
+	brambleLo = {};
+	brambleHi = {};
 	tongueEconFrac = nil;
 	tongueEconFrac2 = nil;
 	saltPlanResolved = false;
@@ -663,7 +681,82 @@ function TiltedEnsureLine()
 	tiltedLineReady = true;
 end
 ------------------------------------------------------------------------------
+-- Reset to Standard-Diagonal's own stable linear fold (2026-09-18) -- the
+-- noisy/bulge-pinch shapes kept reading as "off" no matter how they were
+-- tuned. This computes the exact same diagonal (TiltedCubeS/tiltedS0, plus
+-- the same antisymmetry shift correction TiltedFoldMid uses for
+-- Standard-Diagonal) at a fixed width -- a plain, stable diagonal strip.
+-- Distortion (noise on top of this) is a deliberate later step, not
+-- attempted yet.
+--
+-- Computed locally rather than by calling TiltedFoldMid/TiltedEnsureShift
+-- directly: those go through TiltedSignedDist, which for Bramble
+-- dispatches straight back to BrambleSignedDist/BrambleEnsureShape --
+-- calling them from inside here would recurse. TiltedCubeS and
+-- TiltedEnsureLine are the plain, non-dispatching helpers underneath that
+-- formula, safe to call directly.
+function BrambleEnsureShape()
+	if brambleShapeReady then
+		return
+	end
+	brambleShapeReady = true;
+	local iW, iH = Map.GetGridSize();
+	TiltedEnsureLine();
+	local function rawDiag(x, y)
+		return TiltedCubeS(x, y) - tiltedS0;
+	end
+	local function constantFor(y0)
+		local mx = iW - 1;
+		local my = iH - 1 - y0;
+		return rawDiag(0, y0) + rawDiag(mx, my);
+	end
+	local shiftEven = (1 - constantFor(0)) / 2;
+	local shiftOdd = (1 - constantFor(1)) / 2;
+	local halfWidth = 2; -- total width 4, fixed and stable for now
+	local y = 0;
+	while y < iH do
+		local raw = math.floor(y / 2) - y - tiltedS0;
+		local shift = shiftEven;
+		if y % 2 ~= 0 then
+			shift = shiftOdd;
+		end
+		local center = math.floor(raw + shift + 0.5);
+		local lo = center - halfWidth;
+		local hi = lo + halfWidth * 2 - 1;
+		if lo < 1 then
+			local s = 1 - lo;
+			lo = lo + s;
+			hi = hi + s;
+		end
+		if hi > iW - 2 then
+			local s = hi - (iW - 2);
+			lo = lo - s;
+			hi = hi - s;
+		end
+		brambleLo[y] = lo;
+		brambleHi[y] = hi;
+		y = y + 1;
+	end
+end
+------------------------------------------------------------------------------
+-- Row-local center column of Bramble's separator (see BrambleEnsureShape).
+function BrambleFoldMid(y)
+	BrambleEnsureShape();
+	return math.floor((brambleLo[y] + brambleHi[y]) / 2 + 0.5);
+end
+------------------------------------------------------------------------------
+-- West/east side test for Bramble, in the same >0-means-west convention as
+-- TiltedSignedDist -- exactly antisymmetric under the 180-degree mirror by
+-- construction (BrambleFoldMid(iH-1-y) == iW-1-BrambleFoldMid(y) follows
+-- directly from how the derived rows are built), no shift correction needed.
+function BrambleSignedDist(x, y)
+	return BrambleFoldMid(y) - x;
+end
+------------------------------------------------------------------------------
 function TiltedSignedDist(x, y)
+	if IsBramble() then
+		return BrambleSignedDist(x, y);
+	end
 	TiltedEnsureLine();
 	return TiltedCubeS(x, y) - tiltedS0;
 end
@@ -695,6 +788,9 @@ end
 -- Mirror-consistent column for this row (see TiltedEnsureShift) -- a window
 -- centered here stays the same width after the engine's mirror copy.
 function TiltedFoldMid(y)
+	if IsBramble() then
+		return BrambleFoldMid(y);
+	end
 	TiltedEnsureLine();
 	TiltedEnsureShift();
 	local raw = math.floor(y / 2) - y - tiltedS0;
@@ -757,8 +853,15 @@ function TongueGetJungleDepth()
 	return tongueJungleDepth;
 end
 ------------------------------------------------------------------------------
+-- Bramble note (2026-09-17): these two used to reject any TERRAIN_TUNDRA
+-- tile as a belt-and-suspenders catch for the separator strip itself (which
+-- was always tundra terrain). Since the corner-flavor smear now also paints
+-- real tundra out in the econ zone, that blanket terrain check started
+-- rejecting those tiles from every resource/luxury/home-plot list too --
+-- correctly excluding the actual strip via brambleLo/brambleHi membership
+-- instead fixes that without losing the original protection.
 function TongueIsHomePlot(x, y)
-	if IsSnaky() == false then
+	if IsBramble() == false then
 		return true
 	end
 	local plot = Map.GetPlot(x, y);
@@ -768,7 +871,7 @@ function TongueIsHomePlot(x, y)
 	if plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
 		return false
 	end
-	if plot:GetTerrainType() == TerrainTypes.TERRAIN_TUNDRA then
+	if x >= brambleLo[y] and x <= brambleHi[y] then
 		return false
 	end
 	if TiltedSignedDist(x, y) <= 0 then
@@ -778,14 +881,16 @@ function TongueIsHomePlot(x, y)
 end
 ------------------------------------------------------------------------------
 function TongueResourcePlotOk(x, y)
-	if IsSnaky() == false then
+	if IsBramble() == false then
 		return true
 	end
 	local plot = Map.GetPlot(x, y);
 	if plot == nil then
 		return false
 	end
-	if plot:GetTerrainType() == TerrainTypes.TERRAIN_TUNDRA then
+	-- Excludes the solid jungle core too (BRAMBLE_JUNGLE_CORE_DEPTH), not
+	-- just the tundra strip itself -- see that constant's comment.
+	if x >= brambleLo[y] - BRAMBLE_JUNGLE_CORE_DEPTH and x <= brambleHi[y] + BRAMBLE_JUNGLE_CORE_DEPTH then
 		return false
 	end
 	if plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
@@ -798,7 +903,7 @@ function TongueResourcePlotOk(x, y)
 end
 ------------------------------------------------------------------------------
 function FilterPlotIndexListToTongueHome(list, iW)
-	if IsSnaky() == false or list == nil then
+	if IsBramble() == false or list == nil then
 		return list
 	end
 	local out = {};
@@ -816,7 +921,7 @@ function FilterPlotIndexListToTongueHome(list, iW)
 end
 ------------------------------------------------------------------------------
 function FilterTongueHomeLuxuryLists(lists)
-	if IsSnaky() == false or lists == nil then
+	if IsBramble() == false or lists == nil then
 		return lists
 	end
 	local iW = Map.GetGridSize();
@@ -833,7 +938,7 @@ function FilterTongueHomeLuxuryLists(lists)
 end
 ------------------------------------------------------------------------------
 function FilterTongueHomeResourceLists(self)
-	if IsSnaky() == false then
+	if IsBramble() == false then
 		return
 	end
 	local iW = Map.GetGridSize();
@@ -873,7 +978,7 @@ function FilterTongueHomeResourceLists(self)
 end
 ------------------------------------------------------------------------------
 function TongueIsBarrierPlot(x, y)
-	if IsSnaky() == false then
+	if IsBramble() == false then
 		return false
 	end
 	return TongueIsHomePlot(x, y) == false
@@ -887,12 +992,12 @@ function PlotRejectsNaturalWonder(x, y)
 	if plot == nil then
 		return true
 	end
-	if IsSnaky() and plot:GetTerrainType() == TerrainTypes.TERRAIN_TUNDRA then
+	if IsBramble() and x >= brambleLo[y] and x <= brambleHi[y] then
 		return true
 	end
 	if TiltedSignedDist(x, y) <= 0 then
-		-- Applies to every tilted-mirror-axis climate (Snaky and now
-		-- Standard-Diagonal too), not just Snaky: without this, vanilla's
+		-- Applies to every tilted-mirror-axis climate (Standard-Diagonal
+		-- and Bramble), not just one of them: without this, vanilla's
 		-- PlaceNaturalWonders (which scans the whole canvas, unaware of the
 		-- west/east split) is free to independently place wonders on the
 		-- not-yet-generated "away" half as well as the real west half. Those
@@ -908,21 +1013,21 @@ function PlotRejectsNaturalWonder(x, y)
 end
 ------------------------------------------------------------------------------
 function TongueStartTooClose(x, y)
-	if IsSnaky() then
+	if IsBramble() then
 		if TongueIsHomePlot(x, y) == false then
 			return true
 		end
+		local iH = select(2, Map.GetGridSize());
 		local yy = y - 3;
 		while yy <= y + 3 do
-			local xx = x - 3;
-			while xx <= x + 3 do
-				if Map.PlotDistance(x, y, xx, yy) <= 3 then
-					local adj = Map.GetPlot(xx, yy);
-					if adj ~= nil and adj:GetTerrainType() == TerrainTypes.TERRAIN_TUNDRA then
+			if yy >= 0 and yy < iH then
+				local xx = x - 3;
+				while xx <= x + 3 do
+					if Map.PlotDistance(x, y, xx, yy) <= 3 and xx >= brambleLo[yy] and xx <= brambleHi[yy] then
 						return true
 					end
+					xx = xx + 1;
 				end
-				xx = xx + 1;
 			end
 			yy = yy + 1;
 		end
@@ -1111,7 +1216,7 @@ end
 ------------------------------------------------------------------------------
 function ApplyTongueLuxuryWeights(self)
 	local cfg = GetBarrierConfig();
-	if cfg == nil or (cfg.kind ~= "tongue" and cfg.kind ~= "snaky") then
+	if cfg == nil or (cfg.kind ~= "tongue" and cfg.kind ~= "bramble") then
 		return
 	end
 	local jungle = {};
@@ -1140,7 +1245,7 @@ end
 local DetermineRegionTypesVanilla = AssignStartingPlots.DetermineRegionTypes;
 function AssignStartingPlots:DetermineRegionTypes()
 	DetermineRegionTypesVanilla(self);
-	if IsSnaky() == false then
+	if IsBramble() == false then
 		return
 	end
 	local r = 1;
@@ -1632,7 +1737,7 @@ end
 local AddStrategicBalanceResourcesVanilla = AssignStartingPlots.AddStrategicBalanceResources;
 function AssignStartingPlots:AddStrategicBalanceResources(region_number)
 	AddStrategicBalanceResourcesVanilla(self, region_number);
-	if IsSnaky() then
+	if IsBramble() then
 		local start_point_data = self.startingPlots[region_number];
 		if start_point_data ~= nil then
 			local sx = start_point_data[1];
@@ -2799,6 +2904,9 @@ function ResetWeeveeMapAttempt()
 	oasisJungleExists = false;
 	murkTundraLakeTiles = {};
 	tongueJungleDepth = nil;
+	brambleShapeReady = false;
+	brambleLo = {};
+	brambleHi = {};
 	frostyFrac = nil;
 	luxTargetResolved = false;
 	weeveeStartDistFail = false;
@@ -2833,7 +2941,7 @@ function GetSnowWrapWaterBounds(iW)
 	local wrapHalf = wrapN / 2;
 	local centerHalf = centerN / 2;
 	local mid = math.floor(iW / 2);
-	if IsSnaky() then
+	if IsBramble() then
 		centerHalf = 0;
 	end
 	local minX = wrapHalf + 4;
@@ -3145,8 +3253,12 @@ function WaterAllowedAtXY(x, y)
 	if IsTiltedMirrorAxis() then
 		local wx, wy = TiltedFoldWest(x, y);
 		local lim = TongueHillDist();
-		if IsSnaky() then
-			lim = 4;
+		if IsBramble() then
+			-- Min 7 tiles clear of the separator's actual edge, everywhere --
+			-- using the widest possible strip (7 wide, half-width 4) as the
+			-- buffer so the true distance-to-tundra is never less than 7,
+			-- even where the noisy strip happens to be at its widest.
+			lim = 4 + 7;
 		else
 			-- Standard-Diagonal: keep water at least 7 tiles clear of the
 			-- barrier band's own edge (not just the bare fold line) -- this
@@ -3157,17 +3269,6 @@ function WaterAllowedAtXY(x, y)
 		if TiltedSignedDist(wx, wy) <= lim then
 			return false
 		end
-	end
-	return true
-end
-------------------------------------------------------------------------------
-function SnakyInlandSeaSeedOk(x, y, iW, iH)
-	if WaterAllowedAtXY(x, y) == false then
-		return false
-	end
-	local d = TiltedSignedDist(x, y);
-	if d <= 4 then
-		return false
 	end
 	return true
 end
@@ -3422,7 +3523,7 @@ function GetSnowWrapColumns(iW, y)
 			table.insert(cols, x);
 		end
 	end
-	if centerN > 0 and IsSnaky() == false then
+	if centerN > 0 and IsBramble() == false then
 		local half = centerN / 2;
 		local mid = math.floor(iW / 2);
 		if IsTiltedMirrorAxis() and y ~= nil then
@@ -3447,7 +3548,7 @@ function GetSnowWrapTundraColumns(iW, y)
 		table.insert(cols, half);
 		table.insert(cols, iW - half - 1);
 	end
-	if centerN > 0 and IsSnaky() == false then
+	if centerN > 0 and IsBramble() == false then
 		local half = centerN / 2;
 		table.insert(cols, mid - half - 1);
 		table.insert(cols, mid + half);
@@ -3486,6 +3587,32 @@ function HexDirsForY(y)
 		return {{1, 1}, {1, 0}, {1, -1}, {0, -1}, {-1, 0}, {0, 1}};
 	end
 	return {{0, 1}, {1, 0}, {0, -1}, {-1, -1}, {-1, 0}, {-1, 1}};
+end
+------------------------------------------------------------------------------
+-- Restored 2026-09-16: accidentally deleted along with the old Snaky
+-- cluster it happened to sit inside (it was a shared utility, not a
+-- Snaky-specific function -- ForestMountainsToBareTarget still calls it).
+-- Its absence didn't error visibly: calling a nil global inside the map
+-- generation Lua context silently aborts generation without reaching
+-- StartPlotSystem, instead of surfacing in Lua.log the way a UI-script
+-- error would -- symptom was every climate showing "no valid start" on
+-- load whenever ForestMountainsToBareTarget's forest branch ran.
+function HexNearFeature(x, y, feat, maxd)
+	local yy = y - maxd;
+	while yy <= y + maxd do
+		local xx = x - maxd;
+		while xx <= x + maxd do
+			if Map.PlotDistance(x, y, xx, yy) <= maxd then
+				local p = Map.GetPlot(xx, yy);
+				if p ~= nil and p:GetFeatureType() == feat then
+					return true
+				end
+			end
+			xx = xx + 1;
+		end
+		yy = yy + 1;
+	end
+	return false
 end
 ------------------------------------------------------------------------------
 -- Size of the contiguous mountain blob touching (x,y) (hex-adjacency),
@@ -4191,8 +4318,12 @@ end
 --     island (5-15 tiles), plus 0-6 small islands (1-4 tiles) elsewhere.
 --   Islands force-carve their own 1-tile moat rather than relying on enough
 --     open water already being there -- simpler and can't silently fail.
+-- Also used by Bramble (removed from its exclusion list) -- the ~8%
+-- salt-water target and 50/25/25 back-coast/1-inland/2-inland split match
+-- what the user asked for ("similar amount of water as murky/standard...
+-- several small inland seas or no inland seas, all back coast fine").
 function PlaceDiagonalBackWater(plotTypes, iW, iH)
-	if plotTypes == nil or IsTiltedMirrorAxis() == false or IsSnaky() then
+	if plotTypes == nil or IsTiltedMirrorAxis() == false then
 		return
 	end
 	local evenN = {{0, 1}, {1, 0}, {0, -1}, {-1, -1}, {-1, 0}, {-1, 1}};
@@ -5970,7 +6101,22 @@ function MultilayeredFractal:GeneratePlotsByRegion()
 		world_age = 1 + Map.Rand(3, "Random World Age - Lua");
 	end
 	local args = {world_age = world_age};
+	-- self.iTerrainFlags mirrors the real map's WrapX (false by default here
+	-- -- see GetMapInitData/IsSnowWrapX), so ApplyTectonics' own hillsFrac/
+	-- mountainsFrac fractals are built non-wrapped in X. Civ5's native
+	-- Fractal class tapers toward flat, low-variance height values near a
+	-- non-wrapped edge (it has no "other side" neighbor data to draw
+	-- randomness from), which was silently starving hills/mountains in the
+	-- leftmost ~2-3 columns (and, by the mirror, the rightmost ~2-3) --
+	-- confirmed via WeeveeLogFlatHillSample: column 0 came back ~0-9% hills
+	-- vs ~30-45% by column 3+, in both Standard and Murky. Force wrap-X on
+	-- just for this call -- it only smooths the noise driving hill/mountain
+	-- placement, it doesn't make the actual map wrap -- then restore it,
+	-- since iTerrainFlags is also read by the land/water layers.
+	local savedWrapX = self.iTerrainFlags.FRAC_WRAP_X;
+	self.iTerrainFlags.FRAC_WRAP_X = true;
 	self:ApplyTectonics(args)
+	self.iTerrainFlags.FRAC_WRAP_X = savedWrapX;
 	
 	if false then -- Skirmish
 		for x = iW / 2 - 2, iW / 2 + 1 do
@@ -6077,7 +6223,7 @@ function MultilayeredFractal:GeneratePlotsByRegion()
 				end
 			end
 		elseif cfg.chaoticMountains then
-			if cfg.kind ~= "tongue" and cfg.kind ~= "snaky" then
+			if cfg.kind ~= "tongue" and cfg.kind ~= "bramble" then
 				local dens = mountainDensity;
 				if cfg.kind == "frosty" then
 					dens = dens * 1.28;
@@ -6173,6 +6319,11 @@ function MultilayeredFractal:GeneratePlotsByRegion()
 			if cfg.kind == "snow" then
 				nBodies = 0;
 			end
+			if cfg.kind == "bramble" then
+				-- Bramble's water is entirely PlaceDiagonalBackWater's, not
+				-- this generic interior-lake system.
+				nBodies = 0;
+			end
 			if minX > maxX then
 				nBodies = 0;
 			end
@@ -6186,11 +6337,9 @@ function MultilayeredFractal:GeneratePlotsByRegion()
 					local ty = minY + Map.Rand(maxY - minY + 1, "Snow Wrap Lake SeedY");
 					local tidx = ty * iW + tx + 1;
 					if self.wholeworldPlotTypes[tidx] ~= PlotTypes.PLOT_OCEAN then
-						if cfg.kind ~= "snaky" or SnakyInlandSeaSeedOk(tx, ty, iW, iH) then
-							if (not wantIsland) or neighborsFit(tx, ty) then
-								seedX, seedY = tx, ty;
-								break
-							end
+						if (not wantIsland) or neighborsFit(tx, ty) then
+							seedX, seedY = tx, ty;
+							break
 						end
 					end
 				end
@@ -6201,10 +6350,8 @@ function MultilayeredFractal:GeneratePlotsByRegion()
 						local ty = minY + Map.Rand(maxY - minY + 1, "Snow Wrap Lake SeedY");
 						local tidx = ty * iW + tx + 1;
 						if self.wholeworldPlotTypes[tidx] ~= PlotTypes.PLOT_OCEAN then
-							if cfg.kind ~= "snaky" or SnakyInlandSeaSeedOk(tx, ty, iW, iH) then
-								seedX, seedY = tx, ty;
-								break
-							end
+							seedX, seedY = tx, ty;
+							break
 						end
 					end
 				end
@@ -6281,9 +6428,10 @@ function MultilayeredFractal:GeneratePlotsByRegion()
 	if IsSnowNoWrap() then
 		if IsOasisClimate() then
 			FillOasisWestNoOcean(self.wholeworldPlotTypes, iW, iH);
-		elseif IsTiltedMirrorAxis() and IsSnaky() == false then
-			-- IsTiltedMirrorAxis() is also true for Snaky (Slate) -- it must
-			-- keep using its own ShapeNoWrapBackstrip path, not this one.
+		elseif IsTiltedMirrorAxis() then
+			-- Standard-Diagonal and Bramble both use this (Bramble's water
+			-- target/spread was explicitly matched to it -- see
+			-- PlaceDiagonalBackWater's own comment).
 			PlaceDiagonalBackWater(self.wholeworldPlotTypes, iW, iH);
 		else
 			ShapeNoWrapBackstrip(self.wholeworldPlotTypes, iW, iH);
@@ -6494,7 +6642,7 @@ function GeneratePlotTypes()
 			fLo = iW / 2 - 7;
 			fHi = iW / 2 + 6;
 		end
-		if IsSnaky() == false then
+		if IsBramble() == false then
 			if IsTiltedMirrorAxis() then
 				applyFoothillsNearFold(fLo - iW / 2, fHi - iW / 2, foothillChance)
 				applyDehillsNearFold(fLo - iW / 2, fHi - iW / 2, FRONT_DEHILL_CHANCE)
@@ -6579,7 +6727,7 @@ function GenerateTerrain()
 		args.fGrassLatitude = 0.38;
 		args.fDesertBottomLatitude = 1.1;
 		args.fDesertTopLatitude = 1.1;
-	elseif cfg ~= nil and (cfg.kind == "tongue" or cfg.kind == "snaky") then
+	elseif cfg ~= nil and (cfg.kind == "tongue" or cfg.kind == "bramble") then
 		args.fSnowLatitude = 1.1;
 		args.fTundraLatitude = 1.1;
 		args.iDesertPercent = 0;
@@ -6597,7 +6745,7 @@ function GenerateTerrain()
 	AddMireBands();
 	AddPeaksLayout();
 	AddFrostyLayout();
-	AddSnakyLayout();
+	AddBrambleLayout();
 	WeeveeDbg("GenerateTerrain done");
 end
 ------------------------------------------------------------------------------
@@ -6615,7 +6763,7 @@ end
 ------------------------------------------------------------------------------
 function FeatureGenerator:AddJunglesAtPlot(plot, iX, iY, lat)
 	local cfg = GetBarrierConfig();
-	if cfg ~= nil and (cfg.kind == "wetland" or cfg.kind == "peaks" or cfg.kind == "frosty" or cfg.kind == "tongue" or cfg.kind == "snaky") then
+	if cfg ~= nil and (cfg.kind == "wetland" or cfg.kind == "peaks" or cfg.kind == "frosty" or cfg.kind == "tongue" or cfg.kind == "bramble") then
 		return
 	end
 	local jungle_height = self.jungles:GetHeight(iX, iY);
@@ -6628,7 +6776,7 @@ end
 ------------------------------------------------------------------------------
 function FeatureGenerator:AddMarshAtPlot(plot, iX, iY, lat)
 	local cfg = GetBarrierConfig();
-	if cfg ~= nil and (cfg.kind == "wetland" or cfg.kind == "peaks" or cfg.kind == "frosty" or cfg.kind == "tongue" or cfg.kind == "snaky") then
+	if cfg ~= nil and (cfg.kind == "wetland" or cfg.kind == "peaks" or cfg.kind == "frosty" or cfg.kind == "tongue" or cfg.kind == "bramble") then
 		return
 	end
 	local marsh_height = self.marsh:GetHeight(iX, iY)
@@ -6654,7 +6802,7 @@ function FeatureGenerator:AddForestsAtPlot(plot, iX, iY, lat)
 	if cfg ~= nil and cfg.kind == "frosty" then
 		return
 	end
-	if cfg ~= nil and (cfg.kind == "tongue" or cfg.kind == "snaky") then
+	if cfg ~= nil and (cfg.kind == "tongue" or cfg.kind == "bramble") then
 		return
 	end
 	if cfg ~= nil and cfg.kind == "peaks" then
@@ -6729,7 +6877,7 @@ end
 function FeatureGenerator:AdjustTerrainTypes()
 	local cfg = GetBarrierConfig();
 	local softenArctic = true;
-	if cfg ~= nil and (cfg.kind == "wasteland" or cfg.kind == "wetland" or cfg.kind == "peaks" or cfg.kind == "frosty" or cfg.kind == "tongue" or cfg.kind == "snaky") then
+	if cfg ~= nil and (cfg.kind == "wasteland" or cfg.kind == "wetland" or cfg.kind == "peaks" or cfg.kind == "frosty" or cfg.kind == "tongue" or cfg.kind == "bramble") then
 		softenArctic = false;
 	end
 	local width = self.iGridW - 1;
@@ -8472,7 +8620,7 @@ function AddFeatures()
 		args.iForestPercent = 28;
 		args.fMarshPercent = 0;
 		args.iOasisPercent = 0;
-	elseif cfg ~= nil and (cfg.kind == "tongue" or cfg.kind == "snaky") then
+	elseif cfg ~= nil and (cfg.kind == "tongue" or cfg.kind == "bramble") then
 		args.iJunglePercent = 0;
 		args.iJungleFactor = 5;
 		args.iForestPercent = 0;
@@ -8498,8 +8646,62 @@ function AddFeatures()
 	AddFrostyForests();
 	AddFrostySouthJungle();
 	AddFrostyIce();
-	AddSnakyFeatures();
+	AddBrambleFeatures();
 	ForestMountainsToBareTarget();
+	WeeveeLogFlatHillSample();
+end
+------------------------------------------------------------------------------
+-- Debug-only: logs the hill/flat ratio (mountains and water excluded) for
+-- each individual econ-zone column, from the actual leftmost column that can
+-- ever have land out to a buffer short of the front mountain columns -- one
+-- line per column, so it can be checked directly against a manual in-game
+-- count instead of going by eye on a pre-summed band. Written to
+-- weevee_persist.log (not weevee_dbg.log, which is truncated at the start of
+-- every new generation, and not Lua.log/print, which the user has found
+-- unreliable) so results from multiple rerolls accumulate in one place.
+-- West side only; the mirror always matches it on the east.
+function WeeveeLogFlatHillSample()
+	local cfg = GetBarrierConfig();
+	if cfg == nil or (cfg.kind ~= "snow" and cfg.kind ~= "wetland") then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local col1, col2, col3, col4, col5 = GetFrontMountainColumns5West(iW);
+	local function sampleColumn(x)
+		local hill, flat = 0, 0;
+		local y = 0;
+		while y < iH do
+			local plot = Map.GetPlot(x, y);
+			if plot ~= nil and plot:IsWater() == false and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
+				if plot:GetPlotType() == PlotTypes.PLOT_HILLS then
+					hill = hill + 1;
+				else
+					flat = flat + 1;
+				end
+			end
+			y = y + 1;
+		end
+		local total = hill + flat;
+		local pct = 0;
+		if total > 0 then
+			pct = math.floor(hill * 1000 / total + 0.5) / 10;
+		end
+		WeeveeDbgPersist("WeeveeFlatHillSample " .. cfg.kind .. " col=" .. x
+			.. " hills=" .. hill .. " flat=" .. flat .. " total=" .. total .. " hill%=" .. pct);
+	end
+	-- Literal 3 leftmost map columns -- the forced-ocean rim this used to
+	-- read off of (GeneratePlotsByRegion's x_west/rimW) has since been made
+	-- conditional/overwritten later in the pipeline and is no longer a
+	-- reliable indicator of where land actually starts.
+	local xWest = 0;
+	-- Stop a buffer short of col5 (the outermost of the 5 front-mountain
+	-- columns) to keep foothill contamination out of the econ-zone read.
+	local econEnd = col5 - 4;
+	local x = xWest;
+	while x <= econEnd do
+		sampleColumn(x);
+		x = x + 1;
+	end
 end
 ------------------------------------------------------------------------------
 ------------------------------------------------------------------------------
@@ -9284,7 +9486,7 @@ function AssignStartingPlots:GenerateRegions(args)
 				centerHalf = 0;
 			end
 			self.inhabited_Width = (mid - centerHalf) - setback - 1 - self.inhabited_WestX + 1;
-			if IsTiltedMirrorAxis() and IsSnaky() == false then
+			if IsTiltedMirrorAxis() and IsBramble() == false then
 				local keep = math.floor(self.inhabited_Height * 0.62);
 				if keep < 8 then
 					keep = 8;
@@ -9334,7 +9536,7 @@ function AssignStartingPlots:GenerateRegions(args)
 				lastEast = iW - setforward - wrapHalf;
 			end
 			self.inhabited_Width = lastEast - self.inhabited_WestX + 1;
-			if IsTiltedMirrorAxis() and IsSnaky() == false then
+			if IsTiltedMirrorAxis() and IsBramble() == false then
 				local keep = math.floor(self.inhabited_Height * 0.62);
 				if keep < 8 then
 					keep = 8;
@@ -9737,10 +9939,42 @@ function SetDivide()
 							plot:SetPlotType(PlotTypes.PLOT_LAND, false, false);
 						end
 						if cfg.kind == "wetland" then
-							if Map.Rand(100, "Wetland Barrier Terrain") < 20 then
-								plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+							-- The econ zones' own tundra bands sit at opposite
+							-- ends of the map (mirroring turns west's tundra
+							-- edge into east's tundra edge on the far side),
+							-- so bleed tundra into the barrier from BOTH the
+							-- y=iH-1 and y=0 ends, fading through a plains
+							-- transition into the barrier's normal grass/
+							-- marsh-eligible vertical center. Only the y=iH-1
+							-- end is coded explicitly -- since this whole loop
+							-- only ever writes plots MirrorOwnsPlot lets it
+							-- write, the standard end-of-generation mirror
+							-- copy reproduces the fade at the y=0 end from it.
+							local yNorm = 0;
+							if iH > 1 then
+								yNorm = y / (iH - 1);
+							end
+							local roll = Map.Rand(100, "Wetland Barrier Terrain");
+							if yNorm >= 0.78 then
+								local t = (yNorm - 0.78) / 0.22;
+								if roll < 40 + t * 55 then
+									plot:SetTerrainType(TerrainTypes.TERRAIN_TUNDRA, false, false);
+								else
+									plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+								end
+							elseif yNorm >= 0.5 then
+								local t = (yNorm - 0.5) / 0.28;
+								if roll < 25 + t * 45 then
+									plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+								else
+									plot:SetTerrainType(TerrainTypes.TERRAIN_GRASS, false, false);
+								end
 							else
-								plot:SetTerrainType(TerrainTypes.TERRAIN_GRASS, false, false);
+								if roll < 20 then
+									plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+								else
+									plot:SetTerrainType(TerrainTypes.TERRAIN_GRASS, false, false);
+								end
 							end
 						end
 					end
@@ -10236,10 +10470,6 @@ function FrostyHexNeighbors(x, y)
 		return {{0, 1}, {1, 0}, {0, -1}, {-1, -1}, {-1, 0}, {-1, 1}};
 	end
 	return {{1, 1}, {1, 0}, {1, -1}, {0, -1}, {-1, 0}, {0, 1}};
-end
-------------------------------------------------------------------------------
-function ConnectSnakyPlotWaterToWest(plotTypes, iW, iH)
-	ConnectInlandSeasToWest(plotTypes, iW, iH);
 end
 ------------------------------------------------------------------------------
 function ConnectInlandSeasToWest(plotTypes, iW, iH)
@@ -10911,558 +11141,219 @@ function PaintEconBands(band, iW, iH, skip, mirrored)
 	end
 end
 ------------------------------------------------------------------------------
-function SnakyTundraDistField(iW, iH)
-	local dist = {};
-	local qx = {};
-	local qy = {};
-	local y = 0;
-	while y < iH do
-		local x = 0;
-		while x < iW do
-			local k = y * iW + x;
-			dist[k] = 999;
-			local plot = Map.GetPlot(x, y);
-			if plot ~= nil and plot:IsWater() == false then
-				if plot:GetTerrainType() == TerrainTypes.TERRAIN_TUNDRA then
-					dist[k] = 0;
-					table.insert(qx, x);
-					table.insert(qy, y);
-				end
-			end
-			x = x + 1;
-		end
-		y = y + 1;
-	end
-	local qi = 1;
-	while qi <= #qx do
-		local cx = qx[qi];
-		local cy = qy[qi];
-		local cd = dist[cy * iW + cx];
-		local dirs = FrostyHexNeighbors(cx, cy);
-		local di = 1;
-		while di <= 6 do
-			local nx = cx + dirs[di][1];
-			local ny = cy + dirs[di][2];
-			if ny >= 0 and ny < iH and nx >= 0 and nx < iW then
-				local np = Map.GetPlot(nx, ny);
-				if np ~= nil and np:IsWater() == false then
-					local k = ny * iW + nx;
-					local nd = cd + 1;
-					if nd < dist[k] then
-						dist[k] = nd;
-						table.insert(qx, nx);
-						table.insert(qy, ny);
-					end
-				end
-			end
-			di = di + 1;
-		end
-		qi = qi + 1;
-	end
-	return dist
-end
-------------------------------------------------------------------------------
-function HexNearFeature(x, y, feat, maxd)
-	local yy = y - maxd;
-	while yy <= y + maxd do
-		local xx = x - maxd;
-		while xx <= x + maxd do
-			if Map.PlotDistance(x, y, xx, yy) <= maxd then
-				local p = Map.GetPlot(xx, yy);
-				if p ~= nil and p:GetFeatureType() == feat then
-					return true
-				end
-			end
-			xx = xx + 1;
-		end
-		yy = yy + 1;
-	end
-	return false
-end
-------------------------------------------------------------------------------
-function SnakyForestWanted(x, y, iW, iH)
-	local xN = 0;
-	if iW > 2 then
-		xN = x / (iW * 0.5);
-	end
-	local yN = 0;
-	if iH > 1 then
-		yN = y / (iH - 1);
-	end
-	local n = TongueEconNoise(x, y, 2);
-	if xN <= 0.26 + n * 0.10 and yN <= 0.58 + n * 0.08 then
-		return true
-	end
-	if xN <= 0.16 + n * 0.05 and yN <= 0.84 then
-		return true
-	end
-	if n > 0.12 and xN <= 0.46 + n * 0.10 and yN >= 0.10 and yN <= 0.54 then
-		return true
-	end
-	return false
-end
-------------------------------------------------------------------------------
-function SnakyPeakPlotUsable(plot, skip, mirrored, iW, iH)
-	if PeakPlotUsable(plot, skip, mirrored, iW, nil) == false then
-		return false
-	end
-	if plot:GetTerrainType() == TerrainTypes.TERRAIN_TUNDRA then
-		return false
-	end
-	if plot:GetFeatureType() == FeatureTypes.FEATURE_JUNGLE then
-		return false
-	end
-	local x = plot:GetX();
-	local y = plot:GetY();
-	if SnakyForestWanted(x, y, iW, iH) == false then
-		return false
-	end
-	local xN = 0;
-	if iW > 2 then
-		xN = x / (iW * 0.5);
-	end
-	local yN = 0;
-	if iH > 1 then
-		yN = y / (iH - 1);
-	end
-	if xN > 0.28 or yN > 0.52 then
-		return false
-	end
-	return true
-end
-------------------------------------------------------------------------------
-function SnakyPlaceForestPeaks(iW, iH, skip, mirrored)
-	local nWant = 1;
-	if Map.Rand(100, "Snaky Extra Peak") < 22 then
-		nWant = 2;
-	end
-	local nPlaced = 0;
-	local tries = 0;
-	while nPlaced < nWant and tries < 60 do
-		tries = tries + 1;
-		local sx = Map.Rand(math.floor(iW / 2), "Snaky Peak X");
-		local sy = Map.Rand(iH, "Snaky Peak Y");
-		if skip[sx] ~= true and ((not mirrored) or (sx <= iW * 0.5)) then
-			local seed = Map.GetPlot(sx, sy);
-			if seed ~= nil and SnakyPeakPlotUsable(seed, skip, mirrored, iW, iH) then
-				if PeakMassifClear(sx, sy, 5, iW, iH, skip, mirrored) then
-					local q = {};
-					table.insert(q, seed);
-					seed:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
-					seed:SetFeatureType(FeatureTypes.NO_FEATURE, -1);
-					local target = PeakBlobTargetSize();
-					local qi = 1;
-					local grown = 1;
-					while qi <= #q and grown < target do
-						local p = q[qi];
-						qi = qi + 1;
-						local d0 = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Snaky Peak Dir");
-						local k = 0;
-						while k < DirectionTypes.NUM_DIRECTION_TYPES and grown < target do
-							local d = d0 + k;
-							if d >= DirectionTypes.NUM_DIRECTION_TYPES then
-								d = d - DirectionTypes.NUM_DIRECTION_TYPES;
-							end
-							local adj = PlotDirNoXWrap(p:GetX(), p:GetY(), d);
-							if adj ~= nil then
-								local cand = adj;
-								if Map.Rand(100, "Snaky Peak Skip") < 26 then
-									local far = PlotDirNoXWrap(adj:GetX(), adj:GetY(), d);
-									if far ~= nil then
-										cand = far;
-									end
-								end
-								if SnakyPeakPlotUsable(cand, skip, mirrored, iW, iH) then
-									if PeakTouchesForeignMountain(cand, q) == false then
-										local packed = PeakCountBlobNeighbors(cand, q);
-										local allow = true;
-										if packed >= 3 and Map.Rand(100, "Snaky Peak Pack") >= 20 then
-											allow = false;
-										end
-										if allow and Map.Rand(100, "Snaky Peak Grow") < 76 then
-											cand:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
-											cand:SetFeatureType(FeatureTypes.NO_FEATURE, -1);
-											table.insert(q, cand);
-											grown = grown + 1;
-										end
-									end
-								end
-							end
-							k = k + 1;
-						end
-					end
-					nPlaced = nPlaced + 1;
-				end
-			end
-		end
-	end
-	print("Snaky forest peaks:", nPlaced);
-end
-------------------------------------------------------------------------------
-------------------------------------------------------------------------------
-function SnakyWobble(x, y)
-	if snakyAmp == nil then
-		snakyAmp = 1 + Map.Rand(2, "Snaky Amp");
-	end
-	if snakyFrac == nil then
-		local iW, iH = Map.GetGridSize();
-		snakyFrac = Fractal.Create(iW, iH, 4, Map.GetFractalFlags(), -1, -1);
-	end
-	return (snakyFrac:GetHeight(x, y) - 128) / 128 * snakyAmp;
-end
-------------------------------------------------------------------------------
-function SnakyTundraWanted(x, y)
-	local d = TiltedSignedDist(x, y);
-	local nogo = TongueNoGoWidth();
-	local base = nogo * 0.75;
-	if base < 2 then
-		base = 2;
-	end
-	if base > 4 then
-		base = 4;
-	end
-	local wob = SnakyWobble(0, y);
-	local w = base + wob * 0.7;
-	if w < 2 then
-		w = 2;
-	end
-	if w > 4 then
-		w = 4;
-	end
-	local shift = wob * 0.85;
-	local back = w * 0.5;
-	local home = w - back;
-	local dd = d - shift;
-	if dd >= -back and dd <= home then
-		return true
-	end
-	return false
-end
-------------------------------------------------------------------------------
-function SnakyNearTundra(x, y, maxd)
+-- Live-map (Map.GetPlot) mirrored mountain placement, for pipeline stages
+-- after GeneratePlotTypes' temporary plotTypes array is gone -- Bramble's
+-- separator shape isn't known until AddBrambleLayout runs (GenerateTerrain
+-- stage), so its contact-point mountains can't use the array-based
+-- PlaceMirroredMountainCapped the other climates' front mountains use.
+-- Writes both the tile and its 180-rotation mirror immediately (rather than
+-- west-only + trust the final late mirror pass) so AddRivers, which runs
+-- right after GenerateTerrain, sees the real mountain on both sides.
+function BramblePlaceMirroredMountain(x, y, cap)
 	local iW, iH = Map.GetGridSize();
-	local seen = {};
-	local qx = {x};
-	local qy = {y};
-	local qd = {0};
-	local qi = 1;
-	seen[y * iW + x] = true;
-	while qi <= #qx do
-		local cx = qx[qi];
-		local cy = qy[qi];
-		local cd = qd[qi];
-		local plot = Map.GetPlot(cx, cy);
-		if plot ~= nil and plot:GetTerrainType() == TerrainTypes.TERRAIN_TUNDRA then
-			return true
-		end
-		if cd < maxd then
-			local dirs = FrostyHexNeighbors(cx, cy);
-			local di = 1;
-			while di <= 6 do
-				local nx = cx + dirs[di][1];
-				local ny = cy + dirs[di][2];
-				if ny >= 0 and ny < iH and nx >= 0 and nx < iW then
-					local k = ny * iW + nx;
-					if seen[k] ~= true then
-						seen[k] = true;
-						table.insert(qx, nx);
-						table.insert(qy, ny);
-						table.insert(qd, cd + 1);
-					end
-				end
-				di = di + 1;
-			end
-		end
-		qi = qi + 1;
-	end
-	return false
-end
-------------------------------------------------------------------------------
-function SnakySealSeparator()
-	local iW, iH = Map.GetGridSize();
-	local skip = FillMireSkip(iW);
-	local mirrored = (DEF_MIRRORED == 1);
-	local y = 0;
-	while y < iH do
-		local x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
-				local plot = Map.GetPlot(x, y);
-				if plot ~= nil and plot:IsWater() == false then
-					if SnakyTundraWanted(x, y) then
-						plot:SetTerrainType(TerrainTypes.TERRAIN_TUNDRA, false, false);
-						plot:SetFeatureType(FeatureTypes.NO_FEATURE, -1);
-						if plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
-							plot:SetPlotType(PlotTypes.PLOT_LAND, false, false);
-						end
-					end
-				end
-			end
-			x = x + 1;
-		end
-		y = y + 1;
-	end
-end
-------------------------------------------------------------------------------
-function StripSnakySeparatorFeatures()
-	if IsSnaky() == false then
-		return
-	end
-	local iW, iH = Map.GetGridSize();
-	local y = 0;
-	while y < iH do
-		local x = 0;
-		while x < iW do
-			local plot = Map.GetPlot(x, y);
-			if plot ~= nil and plot:GetTerrainType() == TerrainTypes.TERRAIN_TUNDRA then
-				local f = plot:GetFeatureType();
-				if f == FeatureTypes.FEATURE_FOREST or f == FeatureTypes.FEATURE_JUNGLE then
-					plot:SetFeatureType(FeatureTypes.NO_FEATURE, -1);
-				end
-			end
-			x = x + 1;
-		end
-		y = y + 1;
-	end
-end
-------------------------------------------------------------------------------
-function AddSnakyLayout()
-	local cfg = GetBarrierConfig();
-	if cfg == nil or cfg.kind ~= "snaky" then
-		return
-	end
-	WeeveeDbg("AddSnakyLayout");
-	local iW, iH = Map.GetGridSize();
-	local skip = FillMireSkip(iW);
-	local mirrored = (DEF_MIRRORED == 1);
-	local jDepth = TongueGetJungleDepth();
-	local forestDepth = 4;
-	SnakyWobble(0, 0);
-	print("Snaky nogo", TongueNoGoWidth(), "amp", snakyAmp, "jungle", jDepth);
-	local y = 0;
-	while y < iH do
-		local x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
-				local plot = Map.GetPlot(x, y);
-				if plot ~= nil and plot:IsWater() == false then
-					if SnakyTundraWanted(x, y) then
-						plot:SetFeatureType(FeatureTypes.NO_FEATURE, -1);
-						plot:SetTerrainType(TerrainTypes.TERRAIN_TUNDRA, false, false);
-						plot:SetPlotType(PlotTypes.PLOT_LAND, false, false);
-					else
-						plot:SetFeatureType(FeatureTypes.NO_FEATURE, -1);
-						plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-						if plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
-							plot:SetPlotType(PlotTypes.PLOT_LAND, false, false);
-						end
-					end
-				end
-			end
-			x = x + 1;
-		end
-		y = y + 1;
-	end
-	local nBlob = 2 + Map.Rand(2, "Snaky Blob Count");
-	local b = 1;
-	while b <= nBlob do
-		local tries = 0;
-		while tries < 40 do
-			tries = tries + 1;
-			local sx = Map.Rand(math.floor(iW / 2), "Snaky Blob X");
-			local sy = Map.Rand(iH, "Snaky Blob Y");
-			if skip[sx] ~= true then
-				local seed = Map.GetPlot(sx, sy);
-				if seed ~= nil and seed:IsWater() == false and seed:GetTerrainType() == TerrainTypes.TERRAIN_TUNDRA then
-					local target = 4 + Map.Rand(6, "Snaky Blob Size");
-					local body = {{sx, sy}};
-					local guard = 0;
-					while #body < target and guard < 50 do
-						guard = guard + 1;
-						local p = body[Map.Rand(#body, "Snaky Blob Pick") + 1];
-						local dirs = FrostyHexNeighbors(p[1], p[2]);
-						local di = 1 + Map.Rand(6, "Snaky Blob Dir");
-						if di > 6 then
-							di = 6;
-						end
-						local nx = p[1] + dirs[di][1];
-						local ny = p[2] + dirs[di][2];
-						local np = Map.GetPlot(nx, ny);
-						if np ~= nil and skip[nx] ~= true and np:IsWater() == false then
-							if MirrorOwnsPlot(nx, ny, mirrored, iW) then
-								if np:GetTerrainType() ~= TerrainTypes.TERRAIN_TUNDRA then
-									if SnakyTundraWanted(nx, ny) then
-										np:SetFeatureType(FeatureTypes.NO_FEATURE, -1);
-										np:SetTerrainType(TerrainTypes.TERRAIN_TUNDRA, false, false);
-										np:SetPlotType(PlotTypes.PLOT_LAND, false, false);
-										table.insert(body, {nx, ny});
-									end
-								else
-									table.insert(body, {nx, ny});
-								end
-							end
-						end
-					end
-					break
-				end
-			end
-		end
-		b = b + 1;
-	end
-	local nBite = 2 + Map.Rand(2, "Snaky Bite Count");
-	b = 1;
-	while b <= nBite do
-		local tries = 0;
-		while tries < 40 do
-			tries = tries + 1;
-			local sx = Map.Rand(math.floor(iW / 2), "Snaky Bite X");
-			local sy = Map.Rand(iH, "Snaky Bite Y");
-			if skip[sx] ~= true then
-				local seed = Map.GetPlot(sx, sy);
-				if seed ~= nil and seed:IsWater() == false and seed:GetTerrainType() == TerrainTypes.TERRAIN_TUNDRA then
-					if TiltedSignedDist(sx, sy) > 0 then
-						local target = 4 + Map.Rand(8, "Snaky Bite Size");
-						local n = 0;
-						local steps = 0;
-						local cx, cy = sx, sy;
-						while n < target and steps < 24 do
-							steps = steps + 1;
-							local plot = Map.GetPlot(cx, cy);
-							if plot == nil or plot:IsWater() or skip[cx] == true then
-								break
-							end
-							if TiltedSignedDist(cx, cy) <= 0 then
-								break
-							end
-							if plot:GetTerrainType() == TerrainTypes.TERRAIN_TUNDRA then
-								if SnakyTundraWanted(cx, cy) == false then
-									plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-									n = n + 1;
-								end
-							end
-							local dirs = FrostyHexNeighbors(cx, cy);
-							local di = 1 + Map.Rand(6, "Snaky Bite Dir");
-							if di > 6 then
-								di = 6;
-							end
-							cx = cx + dirs[di][1];
-							cy = cy + dirs[di][2];
-						end
-						break
-					end
-				end
-			end
-		end
-		b = b + 1;
-	end
-	SnakySealSeparator();
-	y = 0;
-	while y < iH do
-		local x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
-				local plot = Map.GetPlot(x, y);
-				if plot ~= nil and plot:IsWater() == false and plot:GetTerrainType() == TerrainTypes.TERRAIN_TUNDRA then
-					if plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
-						local edge = false;
-						local dirs = FrostyHexNeighbors(x, y);
-						local di = 1;
-						while di <= 6 do
-							local np = Map.GetPlot(x + dirs[di][1], y + dirs[di][2]);
-							if np ~= nil and np:IsWater() == false and np:GetTerrainType() ~= TerrainTypes.TERRAIN_TUNDRA then
-								edge = true;
-							end
-							di = di + 1;
-						end
-						if edge then
-							if Map.Rand(100, "Snaky Edge Hill") < 34 then
-								plot:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
-							end
-						elseif Map.Rand(100, "Snaky Interior Hill") < 8 then
-							plot:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
-						end
-					end
-				end
-			end
-			x = x + 1;
-		end
-		y = y + 1;
-	end
-	CopyWestToEast();
-	WeeveeDbg("AddSnakyLayout done");
-end
-------------------------------------------------------------------------------
-function SnakyContactPlotOk(plot, skip, mirrored, iW)
-	if plot == nil or plot:IsWater() then
+	if x < 0 or x >= iW or y < 0 or y >= iH then
 		return false
 	end
-	local x = plot:GetX();
-	if skip[x] == true then
+	local plot = Map.GetPlot(x, y);
+	if plot == nil or plot:IsWater() or plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
 		return false
 	end
-	if plot:GetTerrainType() == TerrainTypes.TERRAIN_TUNDRA then
+	local mx, my = iW - x - 1, iH - y - 1;
+	local mp = Map.GetPlot(mx, my);
+	if mp == nil then
 		return false
 	end
-	if TiltedSignedDist(x, plot:GetY()) <= 0 then
-		return false
-	end
-	return true
-end
-------------------------------------------------------------------------------
-function SnakyHexNearMountain(x, y, maxd)
-	local yy = y - maxd;
-	while yy <= y + maxd do
-		local xx = x - maxd;
-		while xx <= x + maxd do
-			if Map.PlotDistance(x, y, xx, yy) <= maxd then
-				local p = Map.GetPlot(xx, yy);
-				if p ~= nil and p:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
-					return true
-				end
-			end
-			xx = xx + 1;
-		end
-		yy = yy + 1;
-	end
-	return false
-end
-------------------------------------------------------------------------------
-function SnakySetFrontMountain(plot)
+	local prevA, prevB = plot:GetPlotType(), mp:GetPlotType();
 	plot:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
-	plot:SetFeatureType(FeatureTypes.NO_FEATURE, -1);
-	plot:SetTerrainType(TerrainTypes.TERRAIN_TUNDRA, false, false);
-end
-------------------------------------------------------------------------------
-function SnakyPlotIsEconLand(plot)
-	if plot == nil or plot:IsWater() then
-		return false
-	end
-	if plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
-		return false
-	end
-	if plot:GetTerrainType() == TerrainTypes.TERRAIN_TUNDRA then
+	mp:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
+	if LiveMountainClumpSize(x, y, cap) > cap or LiveMountainClumpSize(mx, my, cap) > cap then
+		plot:SetPlotType(prevA, false, false);
+		mp:SetPlotType(prevB, false, false);
 		return false
 	end
 	return true
 end
 ------------------------------------------------------------------------------
-function SnakyPlaceContactMountains(iW, iH, skip, mirrored, dist)
-	-- Frozen at the former Front Mountain % option's 25% default (ops=1).
-	local seedPct = 20 + 3 * 1;
-	if seedPct > 42 then
-		seedPct = 42;
+-- Mountains across most of the contact area, then 2-4 big (4+ row) openings
+-- slashed into that wall -- the inverse of the earlier sparse-points
+-- design. Fills first (most rows get a mountain at the tundra/jungle edge,
+-- messy single-tile-or-small-spike, random face each time), then clears
+-- whatever landed inside each carved opening, reverting strip tiles to
+-- proper valley-floor tundra (matching AddBrambleLayout's hill-rim
+-- formula) and non-strip tiles to flat land (jungle repaints those
+-- properly later regardless of plot type).
+function BramblePlaceContactMountains(iW, iH, cap)
+	local yLo, yHi = 2, iH - 3;
+	if yHi < yLo then
+		return
 	end
+	local span = yHi - yLo + 1;
+	-- Exactly 2 gaps, 4-6 rows each, chosen FIRST and locked as non-overlapping
+	-- exclusion zones -- the wall is then built only in what's left over. This
+	-- (rather than filling everything and carving gaps out afterward) is what
+	-- guarantees the gaps can never collectively eat the whole front: there
+	-- are only ever 2 of them, each capped at 6 rows, so a 22-row span (the
+	-- real Small-map front) always has most of its rows left over for wall.
+	local gaps = {};
+	local function overlapsGap(s, e)
+		local i = 1;
+		while i <= #gaps do
+			local g = gaps[i];
+			if s <= g[2] and e >= g[1] then
+				return true
+			end
+			i = i + 1;
+		end
+		return false
+	end
+	local gi = 1;
+	while gi <= 2 do
+		local gapLen = 4 + Map.Rand(3, "Bramble Contact Gap Len"); -- 4-6
+		if gapLen > span then
+			gapLen = span;
+		end
+		local attempt = 1;
+		while attempt <= 20 do
+			local gapStart = yLo + Map.Rand(span - gapLen + 1, "Bramble Contact Gap Start");
+			local gapEnd = gapStart + gapLen - 1;
+			if overlapsGap(gapStart, gapEnd) == false then
+				table.insert(gaps, {gapStart, gapEnd});
+				break
+			end
+			attempt = attempt + 1;
+		end
+		gi = gi + 1;
+	end
+	local function inGap(y)
+		local i = 1;
+		while i <= #gaps do
+			if y >= gaps[i][1] and y <= gaps[i][2] then
+				return true
+			end
+			i = i + 1;
+		end
+		return false
+	end
+	-- Strong noisy ridges: runs of 3-8 consecutive rows, one mountain per row,
+	-- with an outward/inward offset that wanders row to row (never a razor-
+	-- straight line) plus an occasional single-row skip mid-ridge for a
+	-- "splintered" look. Each ridge picks a random face (east/west side of
+	-- the strip) and a random chance to bite straight into the tundra edge.
+	-- Ridges are separated by a short 0-1 row breather (distinct from the 2
+	-- big designated gaps) so the wall reads as several ridge segments
+	-- splintered along the line, not one unbroken bar.
+	local y = yLo;
+	while y <= yHi do
+		if inGap(y) then
+			y = y + 1;
+		else
+			local onEastFace = (Map.Rand(2, "Bramble Contact Face") == 0);
+			local outDir = onEastFace and 1 or -1;
+			local ridgeLen = 3 + Map.Rand(6, "Bramble Contact Ridge Len"); -- 3-8
+			local offset = 0;
+			local step = 1;
+			while step <= ridgeLen and y <= yHi and inGap(y) == false do
+				offset = offset + Map.Rand(3, "Bramble Contact Wander") - 1; -- -1,0,+1
+				if offset < -1 then
+					offset = -1;
+				end
+				if offset > 2 then
+					offset = 2;
+				end
+				-- Small chance to skip this row entirely -- the "splinter" in
+				-- an otherwise near-solid ridge.
+				if Map.Rand(100, "Bramble Contact Splinter") >= 12 then
+					local baseX = onEastFace and (brambleHi[y] + 1) or (brambleLo[y] - 1);
+					local startX = baseX + offset * outDir;
+					if Map.Rand(100, "Bramble Contact Bite") < 15 then
+						startX = onEastFace and brambleHi[y] or brambleLo[y];
+					end
+					BramblePlaceMirroredMountain(startX, y, cap);
+				end
+				y = y + 1;
+				step = step + 1;
+			end
+			y = y + Map.Rand(2, "Bramble Contact Pause"); -- 0-1 row breather
+		end
+	end
+end
+------------------------------------------------------------------------------
+-- Paints Bramble's separator (flat tundra, no random mountain/hill roll --
+-- unlike the generic barrier painter) directly from brambleLo/brambleHi,
+-- then drops the contact-point mountains. West side only; the standard
+-- end-of-generation mirror pass reproduces this on east, same as every
+-- other climate (see feedback_west_side_only_rules).
+function AddBrambleLayout()
+	local cfg = GetBarrierConfig();
+	if cfg == nil or cfg.kind ~= "bramble" then
+		return
+	end
+	WeeveeDbg("AddBrambleLayout");
+	local iW, iH = Map.GetGridSize();
+	local mirrored = (DEF_MIRRORED == 1);
+	BrambleEnsureShape();
+	-- Valley cross-section, flat center out to the rim: a flat tundra floor
+	-- in the middle of the strip, hills toward each edge (where the
+	-- contact-point mountains sit) -- the "old version" look the user
+	-- wants back, instead of the strip reading as uniformly flat.
+	local y = 0;
+	while y < iH do
+		local lo, hi = brambleLo[y], brambleHi[y];
+		local width = hi - lo + 1;
+		local hillBand = math.max(1, math.floor(width / 3));
+		local x = lo;
+		while x <= hi do
+			if MirrorOwnsPlot(x, y, mirrored, iW) then
+				local plot = Map.GetPlot(x, y);
+				if plot ~= nil then
+					local distFromEdge = math.min(x - lo, hi - x);
+					local wantType = PlotTypes.PLOT_LAND;
+					if distFromEdge < hillBand then
+						wantType = PlotTypes.PLOT_HILLS;
+					end
+					if plot:GetPlotType() ~= wantType then
+						plot:SetPlotType(wantType, false, false);
+					end
+					plot:SetFeatureType(FeatureTypes.NO_FEATURE, -1);
+					plot:SetTerrainType(TerrainTypes.TERRAIN_TUNDRA, false, false);
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	BramblePlaceContactMountains(iW, iH, FRONT_MOUNTAIN_CLUMP_CAP);
+	BrambleApplyFoothills(iW, iH, mirrored, 80);
+	WeeveeDbg("AddBrambleLayout done");
+end
+------------------------------------------------------------------------------
+-- Tectonic-realism pass for the contact-point mountains: any flat tile
+-- adjacent to one has a chance to become hills. Live-plot equivalent of the
+-- other climates' applyFoothillAt (that one is local to GeneratePlotTypes
+-- and runs before Bramble's mountains exist, so it never sees them).
+function BrambleApplyFoothills(iW, iH, mirrored, chance)
 	local y = 0;
 	while y < iH do
 		local x = 0;
 		while x < iW do
-			local plot = Map.GetPlot(x, y);
-			if SnakyContactPlotOk(plot, skip, mirrored, iW) and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
-				local d = dist[y * iW + x];
-				if d == 1 then
-					if Map.Rand(100, "Snaky Contact Mtn") < seedPct then
-						SnakySetFrontMountain(plot);
-					elseif Map.Rand(100, "Snaky Contact Hill") < 28 then
+			if MirrorOwnsPlot(x, y, mirrored, iW) then
+				local plot = Map.GetPlot(x, y);
+				if plot ~= nil and plot:IsFlatlands() then
+					local dirs = HexDirsForY(y);
+					local nearMtn = false;
+					local di = 1;
+					while di <= 6 do
+						local nx, ny = x + dirs[di][1], y + dirs[di][2];
+						if nx >= 0 and nx < iW and ny >= 0 and ny < iH then
+							local np = Map.GetPlot(nx, ny);
+							if np ~= nil and np:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
+								nearMtn = true;
+								break
+							end
+						end
+						di = di + 1;
+					end
+					if nearMtn and Map.Rand(100, "Bramble Foothill") < chance then
 						plot:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
 					end
 				end
@@ -11471,53 +11362,42 @@ function SnakyPlaceContactMountains(iW, iH, skip, mirrored, dist)
 		end
 		y = y + 1;
 	end
-	y = 0;
+end
+------------------------------------------------------------------------------
+-- Safety net for the "every tundra tile (outside the corner flavor) touches
+-- jungle, mountain, or more tundra" rule: after the tapered jungle band and
+-- the contact-point mountains are both down, walk every separator tile and
+-- force any remaining flat/water-free neighbor to jungle. Mostly a no-op in
+-- practice (the taper's minimum depth already covers the immediate ring)
+-- but makes the guarantee exact regardless of how a mountain spike happened
+-- to eat into that ring.
+function BrambleFillTundraContactGaps(iW, iH, mirrored)
+	local y = 0;
 	while y < iH do
-		local x = 0;
-		while x < iW do
-			local plot = Map.GetPlot(x, y);
-			if plot ~= nil and plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
-				if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) and TiltedSignedDist(x, y) > 0 then
-					local d0 = dist[y * iW + x];
-					if d0 ~= nil and d0 <= 1 then
-						local dirs = FrostyHexNeighbors(x, y);
-						local di = 1;
-						while di <= 6 do
-							local nx = x + dirs[di][1];
-							local ny = y + dirs[di][2];
-							local np = Map.GetPlot(nx, ny);
-							if SnakyContactPlotOk(np, skip, mirrored, iW) and np:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
-								local nd = dist[ny * iW + nx];
-								local grow = false;
-								if nd == 2 and Map.Rand(100, "Snaky Contact Grow") < 29 then
-									grow = true;
-								elseif nd == 3 and Map.Rand(100, "Snaky Contact Spur") < 13 then
-									grow = true;
-								end
-								if grow then
-									SnakySetFrontMountain(np);
-								end
+		local x = brambleLo[y];
+		while x <= brambleHi[y] do
+			if MirrorOwnsPlot(x, y, mirrored, iW) then
+				local dirs = HexDirsForY(y);
+				local di = 1;
+				while di <= 6 do
+					local nx, ny = x + dirs[di][1], y + dirs[di][2];
+					if nx >= 0 and nx < iW and ny >= 0 and ny < iH and (nx < brambleLo[ny] or nx > brambleHi[ny]) then
+						local np = Map.GetPlot(nx, ny);
+						if np ~= nil and np:IsWater() == false and np:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
+							and np:GetFeatureType() ~= FeatureTypes.FEATURE_JUNGLE then
+							-- Jungle is plains-only on Bramble, never grass;
+							-- hills here to match the core ring's "hill
+							-- jungle" (this fills gaps right at the contact).
+							if np:GetTerrainType() ~= TerrainTypes.TERRAIN_PLAINS then
+								np:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
 							end
-							di = di + 1;
+							if np:GetPlotType() ~= PlotTypes.PLOT_HILLS then
+								np:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
+							end
+							np:SetFeatureType(FeatureTypes.FEATURE_JUNGLE, -1);
 						end
 					end
-				end
-			end
-			x = x + 1;
-		end
-		y = y + 1;
-	end
-	y = 0;
-	while y < iH do
-		local x = 0;
-		while x < iW do
-			local plot = Map.GetPlot(x, y);
-			if SnakyContactPlotOk(plot, skip, mirrored, iW) and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
-				local d = dist[y * iW + x];
-				if d == 1 then
-					if SnakyHexNearMountain(x, y, 5) == false then
-						SnakySetFrontMountain(plot);
-					end
+					di = di + 1;
 				end
 			end
 			x = x + 1;
@@ -11526,133 +11406,153 @@ function SnakyPlaceContactMountains(iW, iH, skip, mirrored, dist)
 	end
 end
 ------------------------------------------------------------------------------
-function SnakyGrassNearWater(iW, iH, skip, mirrored)
+-- Thick and stable right at the tundra edge (deterministic, always fills,
+-- and thicker than before), then a wild zone that reaches further out --
+-- but the wild reach is a row-to-row correlated random walk (like a
+-- smoothed width profile), not an independent roll per row/depth, so it
+-- grows into connected bulges instead of single-row spikes poking into the
+-- tundra. West and east faces walk independently. Finishes with
+-- BrambleFillTundraContactGaps for the hard "every tundra tile touches
+-- jungle/mountain/tundra" guarantee.
+-- Valley cross-section continued past the mountains: the core ring
+-- (BRAMBLE_JUNGLE_CORE_DEPTH) is jungle-on-hills, matching the tundra
+-- rim's hills on the other side of the mountain wall; the wild zone beyond
+-- it is a genuine hill/flat mix rather than uniform flat, so the "frayed"
+-- outer edge still reads as terrain, not just a feature painted on a flat
+-- plane.
+function BrambleAddJungle(iW, iH, mirrored)
+	local baseDepth = BRAMBLE_JUNGLE_CORE_DEPTH;
+	local wildMaxExtra = 5;
+	local function paintIfLand(x, y, wantHills)
+		if MirrorOwnsPlot(x, y, mirrored, iW) == false then
+			return
+		end
+		local plot = Map.GetPlot(x, y);
+		if plot ~= nil and plot:IsWater() == false and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
+			and plot:GetFeatureType() == FeatureTypes.NO_FEATURE then
+			-- Jungle is plains-only on Bramble, never grass.
+			if plot:GetTerrainType() ~= TerrainTypes.TERRAIN_PLAINS then
+				plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+			end
+			local wantType = wantHills and PlotTypes.PLOT_HILLS or PlotTypes.PLOT_LAND;
+			if plot:GetPlotType() ~= wantType then
+				plot:SetPlotType(wantType, false, false);
+			end
+			plot:SetFeatureType(FeatureTypes.FEATURE_JUNGLE, -1);
+		end
+	end
+	-- The wild reach is entirely a row-to-row correlated random walk on the
+	-- DEPTH value -- once a row's depth is decided, it fills solid up to
+	-- that depth (no per-tile hole-punching). Per-tile patchiness inside
+	-- the band was the actual cause of the jagged/disconnected look: even
+	-- with a smoothed depth, independent per-tile rolls left single-tile
+	-- gaps right at the noisiest (outermost) edge, reading as stray spikes
+	-- rather than a connected bulge.
+	local function walkExtra(extra)
+		local delta = Map.Rand(3, "Bramble Jungle Wild Step") - 1;
+		if Map.Rand(100, "Bramble Jungle Wild Burst") < 8 then
+			delta = delta + (Map.Rand(3, "Bramble Jungle Wild Burst Dir") - 1);
+		end
+		extra = extra + delta;
+		if extra < 0 then
+			extra = 0;
+		end
+		if extra > wildMaxExtra then
+			extra = wildMaxExtra;
+		end
+		return extra;
+	end
+	local extraW, extraE = 0, 0;
 	local y = 0;
 	while y < iH do
-		local x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
-				local plot = Map.GetPlot(x, y);
-				if plot ~= nil and plot:IsWater() == false and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
-					if plot:GetTerrainType() == TerrainTypes.TERRAIN_PLAINS then
-						if plot:GetFeatureType() ~= FeatureTypes.FEATURE_JUNGLE then
-							local nearWater = false;
-							local near2 = false;
-							local dirs = FrostyHexNeighbors(x, y);
-							local di = 1;
-							while di <= 6 do
-								local np = Map.GetPlot(x + dirs[di][1], y + dirs[di][2]);
-								if np ~= nil and np:IsWater() then
-									nearWater = true;
-								end
-								di = di + 1;
-							end
-							if nearWater == false then
-								local yy = y - 2;
-								while yy <= y + 2 do
-									local xx = x - 2;
-									while xx <= x + 2 do
-										if Map.PlotDistance(x, y, xx, yy) == 2 then
-											local p2 = Map.GetPlot(xx, yy);
-											if p2 ~= nil and p2:IsWater() then
-												near2 = true;
-											end
-										end
-										xx = xx + 1;
-									end
-									yy = yy + 1;
-								end
-							end
-							if nearWater and Map.Rand(100, "Snaky Coast Grass") < 72 then
-								plot:SetTerrainType(TerrainTypes.TERRAIN_GRASS, false, false);
-							elseif near2 and Map.Rand(100, "Snaky Near Grass") < 38 then
-								plot:SetTerrainType(TerrainTypes.TERRAIN_GRASS, false, false);
-							end
-						end
-					end
-				end
-			end
-			x = x + 1;
+		extraW = walkExtra(extraW);
+		extraE = walkExtra(extraE);
+		local depthW, depthE = baseDepth + extraW, baseDepth + extraE;
+		local d = 1;
+		while d <= depthW do
+			local wantHills = (d <= baseDepth) or (Map.Rand(100, "Bramble Jungle Wild Hill") < 45);
+			paintIfLand(brambleLo[y] - d, y, wantHills);
+			d = d + 1;
+		end
+		d = 1;
+		while d <= depthE do
+			local wantHills = (d <= baseDepth) or (Map.Rand(100, "Bramble Jungle Wild Hill") < 45);
+			paintIfLand(brambleHi[y] + d, y, wantHills);
+			d = d + 1;
 		end
 		y = y + 1;
 	end
+	BrambleFillTundraContactGaps(iW, iH, mirrored);
+	BrambleClearMountainNeighborStrays(iW, iH, mirrored);
 end
 ------------------------------------------------------------------------------
-function SnakyCleanupSeparatorPockets(iW, iH, skip, mirrored)
-	local dist = SnakyTundraDistField(iW, iH);
-	local reached = {};
-	local qx = {};
-	local qy = {};
-	local y = 0;
-	while y < iH do
-		local x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
-				local plot = Map.GetPlot(x, y);
-				if SnakyPlotIsEconLand(plot) then
-					local d = dist[y * iW + x];
-					if d ~= nil and d >= 4 then
-						local k = y * iW + x;
-						reached[k] = true;
-						table.insert(qx, x);
-						table.insert(qy, y);
-					end
-				end
-			end
-			x = x + 1;
-		end
-		y = y + 1;
-	end
-	if #qx < 1 then
-		print("Snaky separator pockets: skip");
-		return
-	end
-	local qi = 1;
-	while qi <= #qx do
-		local cx = qx[qi];
-		local cy = qy[qi];
-		local dirs = FrostyHexNeighbors(cx, cy);
+-- Any Bramble-placed mountain can leave an orphaned neighbor: a contact
+-- mountain that "bites" into the strip (or whose messy spike wanders to a
+-- wider row) can strand a genuine strip tundra tile mid-row instead of at
+-- the edge (BrambleFillTundraContactGaps only looks OUTSIDE
+-- [brambleLo,brambleHi], so it never touches those); separately, a spike
+-- that wanders further from the strip than THAT row's jungle depth happens
+-- to reach leaves BrambleApplyFoothills' hill conversion (which checks
+-- every mountain neighbor regardless of distance) with nothing to pair it
+-- with -- a hills tile with its original stock terrain (plains/grass) and
+-- no feature at all, never folded into the jungle. This checks all 6
+-- neighbors of every mountain in a narrow band around the strip (not the
+-- whole map, so it can't reach the corner-flavor patches) and folds any
+-- still-bare one into jungle, keeping whatever plot type (hills or flat)
+-- it already has -- matching the "mixed hill/flat" jungle look rather than
+-- forcing it flat.
+function BrambleClearMountainNeighborStrays(iW, iH, mirrored)
+	-- True if (x,y) still has at least one in-strip neighbor that's real
+	-- land (not mountain) -- i.e. it's still part of the contiguous valley
+	-- floor, not cut off by mountains on every strip-facing side.
+	local function stillConnectedToFloor(x, y)
+		local dirs = HexDirsForY(y);
 		local di = 1;
 		while di <= 6 do
-			local nx = cx + dirs[di][1];
-			local ny = cy + dirs[di][2];
-			if ny >= 0 and ny < iH and nx >= 0 and nx < iW then
-				if skip[nx] ~= true and MirrorOwnsPlot(nx, ny, mirrored, iW) then
-					local k = ny * iW + nx;
-					if reached[k] ~= true then
-						local np = Map.GetPlot(nx, ny);
-						if SnakyPlotIsEconLand(np) then
-							reached[k] = true;
-							table.insert(qx, nx);
-							table.insert(qy, ny);
-						end
-					end
+			local mx, my = x + dirs[di][1], y + dirs[di][2];
+			if my >= 0 and my < iH and mx >= brambleLo[my] and mx <= brambleHi[my] then
+				local mp = Map.GetPlot(mx, my);
+				if mp ~= nil and mp:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
+					return true
 				end
 			end
 			di = di + 1;
 		end
-		qi = qi + 1;
+		return false
 	end
-	local nKill = 0;
-	y = 0;
+	local buffer = 4;
+	local y = 0;
 	while y < iH do
-		local x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
+		local xLo = math.max(0, brambleLo[y] - buffer);
+		local xHi = math.min(iW - 1, brambleHi[y] + buffer);
+		local x = xLo;
+		while x <= xHi do
+			if MirrorOwnsPlot(x, y, mirrored, iW) then
 				local plot = Map.GetPlot(x, y);
-				if SnakyPlotIsEconLand(plot) then
-					local k = y * iW + x;
-					if reached[k] ~= true then
-						plot:SetFeatureType(FeatureTypes.NO_FEATURE, -1);
-						if TiltedSignedDist(x, y) <= 0 or SnakyTundraWanted(x, y) then
-							plot:SetTerrainType(TerrainTypes.TERRAIN_TUNDRA, false, false);
-						else
-							plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+				if plot ~= nil and plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
+					local dirs = HexDirsForY(y);
+					local di = 1;
+					while di <= 6 do
+						local nx, ny = x + dirs[di][1], y + dirs[di][2];
+						if nx >= 0 and nx < iW and ny >= 0 and ny < iH then
+							local np = Map.GetPlot(nx, ny);
+							if np ~= nil and np:IsWater() == false and np:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
+								and np:GetFeatureType() == FeatureTypes.NO_FEATURE then
+								local insideStrip = (nx >= brambleLo[ny] and nx <= brambleHi[ny]);
+								-- Outside the strip: always safe to fold into
+								-- jungle (nothing else it could legitimately
+								-- be). Inside the strip: only if it's
+								-- actually stranded -- otherwise it's
+								-- ordinary valley floor and must stay tundra.
+								if insideStrip == false or stillConnectedToFloor(nx, ny) == false then
+									if np:GetTerrainType() ~= TerrainTypes.TERRAIN_PLAINS then
+										np:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+									end
+									np:SetFeatureType(FeatureTypes.FEATURE_JUNGLE, -1);
+								end
+							end
 						end
-						if plot:GetPlotType() ~= PlotTypes.PLOT_HILLS then
-							plot:SetPlotType(PlotTypes.PLOT_LAND, false, false);
-						end
-						nKill = nKill + 1;
+						di = di + 1;
 					end
 				end
 			end
@@ -11660,324 +11560,197 @@ function SnakyCleanupSeparatorPockets(iW, iH, skip, mirrored)
 		end
 		y = y + 1;
 	end
-	print("Snaky separator pockets:", nKill);
 end
 ------------------------------------------------------------------------------
-function SnakyMarshPlotOk(plot, dist, iW, minD)
-	if plot == nil or plot:IsWater() then
-		return false
-	end
-	if plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
-		return false
-	end
-	if plot:GetTerrainType() == TerrainTypes.TERRAIN_TUNDRA then
-		return false
-	end
-	if plot:GetTerrainType() == TerrainTypes.TERRAIN_DESERT then
-		return false
-	end
-	local d = dist[plot:GetY() * iW + plot:GetX()];
-	if d == nil or d < minD then
-		return false
-	end
-	return true
-end
-------------------------------------------------------------------------------
-function SnakyPaintMarsh(plot)
-	plot:SetPlotType(PlotTypes.PLOT_LAND, false, false);
-	plot:SetTerrainType(TerrainTypes.TERRAIN_GRASS, false, false);
-	plot:SetFeatureType(FeatureTypes.FEATURE_MARSH, -1);
-end
-------------------------------------------------------------------------------
-function SnakyPlaceMarshBiome(iW, iH, skip, mirrored, dist)
-	local cand = {};
-	local y = 0;
-	while y < iH do
-		local x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
-				local plot = Map.GetPlot(x, y);
-				if SnakyMarshPlotOk(plot, dist, iW, 4) then
-					local nearVeg = HexNearFeature(x, y, FeatureTypes.FEATURE_JUNGLE, 2);
-					if nearVeg == false then
-						nearVeg = HexNearFeature(x, y, FeatureTypes.FEATURE_FOREST, 2);
-					end
-					if nearVeg then
-						table.insert(cand, plot);
-					end
-				end
+-- Realism flourish in the two econ-zone corners farthest from the
+-- separator: one gets a touch of desert, the other a touch of tundra
+-- (picked randomly -- GetClimateLatitudeAtPlot is symmetric about the map's
+-- vertical center, so it can't tell which pole is "colder"). Excluded from
+-- the 7-tile-from-tundra start-distance rule as agreed (this is flavor, not
+-- part of the separator). 1-3 spots per flavor, capped at 4 total for
+-- variance without cluttering the corner. Desert uses loose, bigger curved
+-- strokes scattered around the corner region; tundra uses blocky Tetris-L
+-- shapes that always anchor right at the true corner, hugging it without
+-- filling it solid. Neither stops the walk at water, so a stroke that
+-- crosses a strait keeps painting on the far side -- mainland and a nearby
+-- island can both pick up the flavor.
+function BrambleCornerFlavor(iW, iH, mirrored)
+	-- forestChance: the stock feature generator already ran (AddFeatures
+	-- dispatches this well after featuregen:AddFeatures) before this paints
+	-- fresh terrain over whatever was there, wiping any forest it placed --
+	-- without re-rolling forest ourselves here, these patches would always
+	-- end up bare, unlike naturally-generated tundra elsewhere (Standard)
+	-- which gets its forest before the terrain is finalized.
+	local function paintTile(x, y, terrain, forestChance)
+		if x < 0 or x >= iW or y < 0 or y >= iH then
+			return
+		end
+		if MirrorOwnsPlot(x, y, mirrored, iW) == false then
+			return
+		end
+		if x >= brambleLo[y] and x <= brambleHi[y] then
+			return
+		end
+		local plot = Map.GetPlot(x, y);
+		if plot ~= nil and plot:IsWater() == false and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
+			plot:SetTerrainType(terrain, false, false);
+			if forestChance ~= nil and forestChance > 0 and Map.Rand(100, "Bramble Corner Forest") < forestChance then
+				plot:SetFeatureType(FeatureTypes.FEATURE_FOREST, -1);
+			else
+				plot:SetFeatureType(FeatureTypes.NO_FEATURE, -1);
 			end
+		end
+	end
+	local function brushWidth(x, y, terrain, width, forestChance)
+		local wi = 1;
+		while wi < width do
+			local dirs = HexDirsForY(y);
+			local pick = dirs[1 + Map.Rand(6, "Bramble Corner Brush Dir")];
+			paintTile(x + pick[1], y + pick[2], terrain, forestChance);
+			wi = wi + 1;
+		end
+	end
+	-- Narrows the brush toward the middle of a stroke/leg (full width at
+	-- both ends, down to just the spine tile in the middle third) so each
+	-- stroke reads as two thicker chunks loosely joined by a thin waist
+	-- rather than one solid blob.
+	local function midThinWidth(step, total, width)
+		if total <= 2 then
+			return width;
+		end
+		local midPos = (total + 1) / 2;
+		local halfSpan = total / 2;
+		local midFrac = 1 - math.abs(step - midPos) / halfSpan;
+		if midFrac > 0.55 then
+			return 1;
+		elseif midFrac > 0.25 then
+			return math.max(1, width - 1);
+		end
+		return width;
+	end
+	local function paintDesertStroke(sy, dirSign, terrain)
+		local strokeLen = 5 + Map.Rand(6, "Bramble Smear Len");
+		local width = 2 + Map.Rand(3, "Bramble Smear Width");
+		local x, y = Map.Rand(8, "Bramble Smear StartX"), sy;
+		local step = 1;
+		while step <= strokeLen do
+			paintTile(x, y, terrain, nil);
+			brushWidth(x, y, terrain, midThinWidth(step, strokeLen, width), nil);
+			-- Advance mostly along the edge (dirSign), with an occasional
+			-- sideways nudge for a loose, gentle curve.
+			local dirs = HexDirsForY(y);
+			local best, bestScore = dirs[1], nil;
+			local di = 1;
+			while di <= 6 do
+				local score = dirs[di][2] * dirSign;
+				if bestScore == nil or score > bestScore then
+					bestScore = score;
+					best = dirs[di];
+				end
+				di = di + 1;
+			end
+			local pick = best;
+			if Map.Rand(100, "Bramble Smear Curve") < 40 then
+				pick = dirs[1 + Map.Rand(6, "Bramble Smear Curve Dir")];
+			end
+			x, y = x + pick[1], y + pick[2];
+			step = step + 1;
+		end
+	end
+	local function paintTundraL(cornerY, dirSign, terrain)
+		local leg1 = 2 + Map.Rand(3, "Bramble L Leg1");
+		local leg2 = 3 + Map.Rand(4, "Bramble L Leg2");
+		local width = 1 + Map.Rand(2, "Bramble L Width");
+		local x = 0;
+		local y = cornerY + (Map.Rand(3, "Bramble L Y Jitter") - 1);
+		if y < 0 then
+			y = 0;
+		end
+		if y > iH - 1 then
+			y = iH - 1;
+		end
+		-- Leg 1: straight out from the coast, anchored at the corner.
+		local step = 1;
+		while step <= leg1 do
+			paintTile(x, y, terrain, 22);
+			brushWidth(x, y, terrain, midThinWidth(step, leg1, width), 22);
 			x = x + 1;
+			step = step + 1;
 		end
-		y = y + 1;
-	end
-	if #cand < 1 then
-		print("Snaky marsh biome: 0");
-		return
-	end
-	cand = GetShuffledCopyOfTable(cand);
-	local seed = cand[1];
-	local target = 4 + Map.Rand(4, "Snaky Marsh Core");
-	local placed = 0;
-	local q = {};
-	table.insert(q, seed);
-	SnakyPaintMarsh(seed);
-	placed = placed + 1;
-	local qi = 1;
-	while qi <= #q and placed < target do
-		local p = q[qi];
-		qi = qi + 1;
-		local dirs = FrostyHexNeighbors(p:GetX(), p:GetY());
-		local d0 = 1 + Map.Rand(6, "Snaky Marsh Dir");
-		local k = 0;
-		while k < 6 and placed < target do
-			local di = d0 + k;
-			if di > 6 then
-				di = di - 6;
+		-- Sharp bend, then leg 2 straight along the edge toward the map's
+		-- vertical middle -- the Tetris-L silhouette.
+		step = 1;
+		while step <= leg2 do
+			paintTile(x, y, terrain, 22);
+			brushWidth(x, y, terrain, midThinWidth(step, leg2, width), 22);
+			y = y + dirSign;
+			if y < 0 or y >= iH then
+				break
 			end
-			local np = Map.GetPlot(p:GetX() + dirs[di][1], p:GetY() + dirs[di][2]);
-			if np ~= nil and skip[np:GetX()] ~= true and MirrorOwnsPlot(np:GetX(), np:GetY(), mirrored, iW) then
-				if np:GetFeatureType() ~= FeatureTypes.FEATURE_MARSH then
-					if SnakyMarshPlotOk(np, dist, iW, 4) then
-						if Map.Rand(100, "Snaky Marsh Grow") < 78 then
-							SnakyPaintMarsh(np);
-							table.insert(q, np);
-							placed = placed + 1;
-						end
-					end
-				end
-			end
-			k = k + 1;
+			step = step + 1;
 		end
 	end
-	local blotchN = 3 + Map.Rand(6, "Snaky Marsh Blotch N");
-	local b = 1;
-	while b <= blotchN do
-		local src = q[1 + Map.Rand(#q, "Snaky Marsh Blotch Src")];
-		local ox = Map.Rand(7, "Snaky Marsh Blotch OX") - 3;
-		local oy = Map.Rand(7, "Snaky Marsh Blotch OY") - 3;
-		local bx = src:GetX() + ox;
-		local by = src:GetY() + oy;
-		if Map.PlotDistance(src:GetX(), src:GetY(), bx, by) >= 1 and Map.PlotDistance(src:GetX(), src:GetY(), bx, by) <= 3 then
-			local bp = Map.GetPlot(bx, by);
-			if bp ~= nil and skip[bx] ~= true and MirrorOwnsPlot(bx, by, mirrored, iW) then
-				if bp:GetFeatureType() ~= FeatureTypes.FEATURE_MARSH then
-					if SnakyMarshPlotOk(bp, dist, iW, 4) then
-						SnakyPaintMarsh(bp);
-						table.insert(q, bp);
-						placed = placed + 1;
-					end
-				end
-			end
+	local nDesert = 1 + Map.Rand(3, "Bramble Corner N Desert");
+	local nTundra = 1 + Map.Rand(3, "Bramble Corner N Tundra");
+	if nDesert + nTundra > 4 then
+		nTundra = 4 - nDesert;
+		if nTundra < 1 then
+			nTundra = 1;
+			nDesert = 3;
 		end
-		b = b + 1;
 	end
-	print("Snaky marsh biome:", placed);
+	local desertY, tundraY = 0, iH - 1;
+	if Map.Rand(2, "Bramble Corner Pick") == 0 then
+		desertY, tundraY = iH - 1, 0;
+	end
+	local desertDir = (desertY == 0) and 1 or -1;
+	local tundraDir = (tundraY == 0) and 1 or -1;
+	local yJitterMax = math.floor(iH * 0.12) + 1;
+	local i = 1;
+	while i <= nDesert do
+		local sy = desertY + desertDir * Map.Rand(yJitterMax, "Bramble Desert Y Jitter");
+		if sy < 0 then
+			sy = 0;
+		end
+		if sy > iH - 1 then
+			sy = iH - 1;
+		end
+		paintDesertStroke(sy, desertDir, TerrainTypes.TERRAIN_DESERT);
+		i = i + 1;
+	end
+	i = 1;
+	while i <= nTundra do
+		paintTundraL(tundraY, tundraDir, TerrainTypes.TERRAIN_TUNDRA);
+		i = i + 1;
+	end
 end
 ------------------------------------------------------------------------------
-function SnakyDesertPlotOk(plot, dist, iW)
-	if plot == nil or plot:IsWater() then
-		return false
-	end
-	if plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
-		return false
-	end
-	local t = plot:GetTerrainType();
-	if t == TerrainTypes.TERRAIN_TUNDRA or t == TerrainTypes.TERRAIN_DESERT then
-		return false
-	end
-	if plot:GetFeatureType() == FeatureTypes.FEATURE_MARSH then
-		return false
-	end
-	local x = plot:GetX();
-	local y = plot:GetY();
-	local d = dist[y * iW + x];
-	if d == nil or d < 6 then
-		return false
-	end
-	if HexNearFeature(x, y, FeatureTypes.FEATURE_JUNGLE, 3) then
-		return false
-	end
-	if HexNearFeature(x, y, FeatureTypes.FEATURE_FOREST, 2) then
-		return false
-	end
-	if HexNearFeature(x, y, FeatureTypes.FEATURE_MARSH, 3) then
-		return false
-	end
-	return true
-end
-------------------------------------------------------------------------------
-function SnakyDesertGrowOk(plot, dist, iW)
-	if plot == nil or plot:IsWater() then
-		return false
-	end
-	if plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
-		return false
-	end
-	local t = plot:GetTerrainType();
-	if t == TerrainTypes.TERRAIN_TUNDRA or t == TerrainTypes.TERRAIN_DESERT then
-		return false
-	end
-	local f = plot:GetFeatureType();
-	if f == FeatureTypes.FEATURE_MARSH or f == FeatureTypes.FEATURE_JUNGLE or f == FeatureTypes.FEATURE_FOREST then
-		return false
-	end
-	local d = dist[plot:GetY() * iW + plot:GetX()];
-	if d == nil or d < 5 then
-		return false
-	end
-	return true
-end
-------------------------------------------------------------------------------
-function SnakyDesertEdgeScore(x, y, iH)
-	local west = x;
-	local south = y;
-	local north = iH - 1 - y;
-	local e = west;
-	if south < e then
-		e = south;
-	end
-	if north < e then
-		e = north;
-	end
-	return e
-end
-------------------------------------------------------------------------------
-function SnakyPlaceDesertBiome(iW, iH, skip, mirrored, dist)
-	local best = {};
+-- Rest of the econ zone: mostly plains, some grass, a little forest -- a
+-- plausible-ish falloff away from the jungle border rather than vanilla's
+-- latitude-only grass/plains/desert split. Driven by two fractals sampled
+-- per tile (grass patches, forest patches) instead of an independent
+-- per-tile roll, which read as pixel-noise speckle rather than natural
+-- patches.
+function BrambleEconGradient(iW, iH, mirrored)
+	local terrFrac = Fractal.Create(iW, iH, 4, Map.GetFractalFlags(), -1, -1);
+	local grassHigh = terrFrac:GetHeight(72);
+	local forestFrac = Fractal.Create(iW, iH, 5, Map.GetFractalFlags(), -1, -1);
+	local forestHigh = forestFrac:GetHeight(85);
 	local y = 0;
 	while y < iH do
 		local x = 0;
 		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
+			if MirrorOwnsPlot(x, y, mirrored, iW) and (x < brambleLo[y] or x > brambleHi[y]) then
 				local plot = Map.GetPlot(x, y);
-				if SnakyDesertPlotOk(plot, dist, iW) then
-					local e = SnakyDesertEdgeScore(x, y, iH);
-					if e <= 7 then
-						table.insert(best, plot);
-					end
-				end
-			end
-			x = x + 1;
-		end
-		y = y + 1;
-	end
-	if #best < 1 then
-		y = 0;
-		while y < iH do
-			local x = 0;
-			while x < iW do
-				if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
-					local plot = Map.GetPlot(x, y);
-					if SnakyDesertPlotOk(plot, dist, iW) then
-						table.insert(best, plot);
-					end
-				end
-				x = x + 1;
-			end
-			y = y + 1;
-		end
-	end
-	if #best < 1 then
-		print("Snaky desert biome: 0");
-		return
-	end
-	best = GetShuffledCopyOfTable(best);
-	local seed = best[1];
-	local si = 2;
-	while si <= #best do
-		if SnakyDesertEdgeScore(best[si]:GetX(), best[si]:GetY(), iH) < SnakyDesertEdgeScore(seed:GetX(), seed:GetY(), iH) then
-			if Map.Rand(100, "Snaky Desert Seed") < 70 then
-				seed = best[si];
-			end
-		end
-		si = si + 1;
-	end
-	local target = 5 + Map.Rand(8, "Snaky Desert Size");
-	local placed = 0;
-	local q = {};
-	table.insert(q, seed);
-	seed:SetFeatureType(FeatureTypes.NO_FEATURE, -1);
-	seed:SetTerrainType(TerrainTypes.TERRAIN_DESERT, false, false);
-	placed = placed + 1;
-	local qi = 1;
-	while qi <= #q and placed < target do
-		local p = q[qi];
-		qi = qi + 1;
-		local dirs = FrostyHexNeighbors(p:GetX(), p:GetY());
-		local d0 = 1 + Map.Rand(6, "Snaky Desert Dir");
-		local k = 0;
-		while k < 6 and placed < target do
-			local di = d0 + k;
-			if di > 6 then
-				di = di - 6;
-			end
-			local np = Map.GetPlot(p:GetX() + dirs[di][1], p:GetY() + dirs[di][2]);
-			if np ~= nil and skip[np:GetX()] ~= true and MirrorOwnsPlot(np:GetX(), np:GetY(), mirrored, iW) then
-				if SnakyDesertGrowOk(np, dist, iW) then
-					if Map.Rand(100, "Snaky Desert Grow") < 82 then
-						np:SetFeatureType(FeatureTypes.NO_FEATURE, -1);
-						np:SetTerrainType(TerrainTypes.TERRAIN_DESERT, false, false);
-						table.insert(q, np);
-						placed = placed + 1;
-					end
-				end
-			end
-			k = k + 1;
-		end
-	end
-	print("Snaky desert biome:", placed);
-end
-------------------------------------------------------------------------------
-function AddSnakyFeatures()
-	local cfg = GetBarrierConfig();
-	if cfg == nil or cfg.kind ~= "snaky" then
-		return
-	end
-	WeeveeDbg("AddSnakyFeatures");
-	local iW, iH = Map.GetGridSize();
-	local skip = FillMireSkip(iW);
-	local mirrored = (DEF_MIRRORED == 1);
-	local jDepth = TongueGetJungleDepth();
-	local dist = SnakyTundraDistField(iW, iH);
-	local y = 0;
-	while y < iH do
-		local x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
-				local plot = Map.GetPlot(x, y);
-				if plot ~= nil and plot:IsWater() == false and plot:GetTerrainType() ~= TerrainTypes.TERRAIN_TUNDRA then
-					if plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
-						plot:SetFeatureType(FeatureTypes.NO_FEATURE, -1);
+				if plot ~= nil and plot:IsWater() == false and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
+					and plot:GetFeatureType() ~= FeatureTypes.FEATURE_JUNGLE then
+					if terrFrac:GetHeight(x, y) >= grassHigh then
+						plot:SetTerrainType(TerrainTypes.TERRAIN_GRASS, false, false);
+					else
 						plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-						local d = dist[y * iW + x];
-						if d ~= nil and d > 0 and d < 900 then
-							local n = TongueEconNoise(x, y, 1);
-							local cut = jDepth + n * 1.25;
-							if cut < 2 then
-								cut = 2;
-							end
-							local jungle = false;
-							if d <= 1 then
-								jungle = true;
-							elseif d <= cut then
-								if Map.Rand(100, "Snaky Jungle Core") < 80 then
-									jungle = true;
-								end
-							elseif d <= cut + 3 then
-								local p = 50 - (d - cut) * 14;
-								if p < 10 then
-									p = 10;
-								end
-								if Map.Rand(100, "Snaky Jungle Fizzle") < p then
-									jungle = true;
-								end
-							end
-							if jungle then
-								plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-								plot:SetFeatureType(FeatureTypes.FEATURE_JUNGLE, -1);
-							end
-						end
+					end
+					if plot:GetFeatureType() == FeatureTypes.NO_FEATURE and forestFrac:GetHeight(x, y) >= forestHigh then
+						plot:SetFeatureType(FeatureTypes.FEATURE_FOREST, -1);
 					end
 				end
 			end
@@ -11985,220 +11758,72 @@ function AddSnakyFeatures()
 		end
 		y = y + 1;
 	end
-	y = 0;
+	BrambleCornerFlavor(iW, iH, mirrored);
+end
+------------------------------------------------------------------------------
+function AddBrambleFeatures()
+	local cfg = GetBarrierConfig();
+	if cfg == nil or cfg.kind ~= "bramble" then
+		return
+	end
+	WeeveeDbg("AddBrambleFeatures");
+	local iW, iH = Map.GetGridSize();
+	local mirrored = (DEF_MIRRORED == 1);
+	BrambleEnsureShape();
+	BrambleAddJungle(iW, iH, mirrored);
+	BrambleEconGradient(iW, iH, mirrored);
+	-- Diagnostic: land vs. jungle-covered land, west half only. If a future
+	-- "no valid start" report recurs, this tells us whether jungle coverage
+	-- is still eating the whole econ zone before we go looking anywhere else.
+	local nLand, nJungle = 0, 0;
+	local yy = 0;
+	while yy < iH do
+		local xx = 0;
+		while xx < iW do
+			if MirrorOwnsPlot(xx, yy, mirrored, iW) then
+				local p = Map.GetPlot(xx, yy);
+				if p ~= nil and p:IsWater() == false and p:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
+					nLand = nLand + 1;
+					if p:GetFeatureType() == FeatureTypes.FEATURE_JUNGLE then
+						nJungle = nJungle + 1;
+					end
+				end
+			end
+			xx = xx + 1;
+		end
+		yy = yy + 1;
+	end
+	local diagLine = "Bramble jungle coverage: west land=" .. nLand .. " jungle=" .. nJungle
+		.. " (" .. string.format("%.1f", 100 * nJungle / math.max(1, nLand)) .. "%)";
+	print(diagLine);
+	WeeveeDbg(diagLine);
+	WeeveeDbg("AddBrambleFeatures done");
+end
+------------------------------------------------------------------------------
+-- Post-hoc safety net: clears any feature that ended up on the separator
+-- itself (e.g. from the stock feature generator running before Bramble's
+-- own painting is mirrored). Called late in StartPlotSystem.
+function StripBrambleSeparatorFeatures()
+	if IsBramble() == false then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local mirrored = (DEF_MIRRORED == 1);
+	BrambleEnsureShape();
+	local y = 0;
 	while y < iH do
-		local x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
+		local x = brambleLo[y];
+		while x <= brambleHi[y] do
+			if MirrorOwnsPlot(x, y, mirrored, iW) then
 				local plot = Map.GetPlot(x, y);
-				if plot ~= nil and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN and plot:GetFeatureType() == FeatureTypes.NO_FEATURE then
-					if plot:GetTerrainType() ~= TerrainTypes.TERRAIN_TUNDRA and plot:IsWater() == false then
-						local d = dist[y * iW + x];
-						if d ~= nil and d <= jDepth + 3 then
-							local nJ = 0;
-							local dirs = FrostyHexNeighbors(x, y);
-							local di = 1;
-							while di <= 6 do
-								local np = Map.GetPlot(x + dirs[di][1], y + dirs[di][2]);
-								if np ~= nil and np:GetFeatureType() == FeatureTypes.FEATURE_JUNGLE then
-									nJ = nJ + 1;
-								end
-								di = di + 1;
-							end
-							if nJ >= 4 then
-								plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-								plot:SetFeatureType(FeatureTypes.FEATURE_JUNGLE, -1);
-							end
-						end
-					end
+				if plot ~= nil and plot:GetFeatureType() ~= FeatureTypes.NO_FEATURE then
+					plot:SetFeatureType(FeatureTypes.NO_FEATURE, -1);
 				end
 			end
 			x = x + 1;
 		end
 		y = y + 1;
 	end
-	y = 0;
-	while y < iH do
-		local x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
-				local plot = Map.GetPlot(x, y);
-				if plot ~= nil and plot:IsWater() == false and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
-					if plot:GetTerrainType() ~= TerrainTypes.TERRAIN_TUNDRA and plot:GetFeatureType() ~= FeatureTypes.FEATURE_JUNGLE then
-						local d = dist[y * iW + x];
-						if d ~= nil and d >= 2 and d < 900 then
-							local n = TongueEconNoise(x, y, 1);
-							local cut = jDepth + n * 1.25;
-							if cut < 2 then
-								cut = 2;
-							end
-							local nearJ = HexNearFeature(x, y, FeatureTypes.FEATURE_JUNGLE, 1);
-							if nearJ and d <= cut + 6 and Map.Rand(100, "Snaky Jungle Finger") < 30 + n * 14 then
-								plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-								plot:SetFeatureType(FeatureTypes.FEATURE_JUNGLE, -1);
-							elseif nearJ == false and d >= cut + 1 and d <= cut + 8 then
-								if n > 0.18 and Map.Rand(100, "Snaky Jungle Splinter") < 7 then
-									plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-									plot:SetFeatureType(FeatureTypes.FEATURE_JUNGLE, -1);
-								end
-							end
-						end
-					end
-				end
-			end
-			x = x + 1;
-		end
-		y = y + 1;
-	end
-	local nClump = 3 + Map.Rand(3, "Snaky Jungle Clump Count");
-	local c = 1;
-	while c <= nClump do
-		local tries = 0;
-		while tries < 25 do
-			tries = tries + 1;
-			local sx = Map.Rand(math.floor(iW / 2), "Snaky Jungle Clump X");
-			local sy = Map.Rand(iH, "Snaky Jungle Clump Y");
-			if skip[sx] ~= true and MirrorOwnsPlot(sx, sy, mirrored, iW) then
-				local seed = Map.GetPlot(sx, sy);
-				local d = dist[sy * iW + sx];
-				if seed ~= nil and seed:IsWater() == false and seed:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
-					if seed:GetTerrainType() ~= TerrainTypes.TERRAIN_TUNDRA and HexNearFeature(sx, sy, FeatureTypes.FEATURE_JUNGLE, 2) == false then
-						if d ~= nil and d >= 3 and d <= jDepth + 8 then
-							local target = 1 + Map.Rand(3, "Snaky Jungle Clump Size");
-							local n = 0;
-							local cx, cy = sx, sy;
-							while n < target do
-								local plot = Map.GetPlot(cx, cy);
-								if plot == nil or plot:IsWater() or skip[cx] == true then
-									break
-								end
-								if plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
-									break
-								end
-								if plot:GetTerrainType() == TerrainTypes.TERRAIN_TUNDRA then
-									break
-								end
-								plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-								plot:SetFeatureType(FeatureTypes.FEATURE_JUNGLE, -1);
-								n = n + 1;
-								local dirs = FrostyHexNeighbors(cx, cy);
-								local di = 1 + Map.Rand(6, "Snaky Jungle Clump Dir");
-								if di > 6 then
-									di = 6;
-								end
-								cx = cx + dirs[di][1];
-								cy = cy + dirs[di][2];
-							end
-							break
-						end
-					end
-				end
-			end
-		end
-		c = c + 1;
-	end
-	SnakyPlaceContactMountains(iW, iH, skip, mirrored, dist);
-	SnakyCleanupSeparatorPockets(iW, iH, skip, mirrored);
-	TongueEnsureEconFrac();
-	local forestCut = tongueEconFrac2:GetHeight(48);
-	y = 0;
-	while y < iH do
-		local x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
-				local plot = Map.GetPlot(x, y);
-				if plot ~= nil and plot:IsWater() == false and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
-					if plot:GetTerrainType() ~= TerrainTypes.TERRAIN_TUNDRA and plot:GetFeatureType() ~= FeatureTypes.FEATURE_JUNGLE then
-						if SnakyForestWanted(x, y, iW, iH) and HexNearFeature(x, y, FeatureTypes.FEATURE_JUNGLE, 1) == false then
-							local xN = 0;
-							if iW > 2 then
-								xN = x / (iW * 0.5);
-							end
-							local yN = 0;
-							if iH > 1 then
-								yN = y / (iH - 1);
-							end
-							local sw = (xN <= 0.22 and yN <= 0.48);
-							local h = tongueEconFrac2:GetHeight(x, y);
-							local clump = 62;
-							if sw then
-								clump = 80;
-							end
-							if h >= forestCut then
-								plot:SetTerrainType(TerrainTypes.TERRAIN_GRASS, false, false);
-								if Map.Rand(100, "Snaky Forest Clump") < clump then
-									plot:SetFeatureType(FeatureTypes.FEATURE_FOREST, -1);
-								end
-							elseif Map.Rand(100, "Snaky Forest Finger") < 16 then
-								plot:SetTerrainType(TerrainTypes.TERRAIN_GRASS, false, false);
-								if Map.Rand(100, "Snaky Forest Speck") < 36 then
-									plot:SetFeatureType(FeatureTypes.FEATURE_FOREST, -1);
-								end
-							end
-							if plot:GetTerrainType() == TerrainTypes.TERRAIN_GRASS then
-								if Map.Rand(100, "Snaky Forest Hill") < 28 then
-									plot:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
-								end
-							end
-						end
-					end
-				end
-			end
-			x = x + 1;
-		end
-		y = y + 1;
-	end
-	y = 0;
-	while y < iH do
-		local x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
-				local plot = Map.GetPlot(x, y);
-				if plot ~= nil and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN and plot:GetFeatureType() == FeatureTypes.NO_FEATURE then
-					if plot:GetTerrainType() == TerrainTypes.TERRAIN_GRASS and HexNearFeature(x, y, FeatureTypes.FEATURE_JUNGLE, 1) == false then
-						local nF = 0;
-						local dirs = FrostyHexNeighbors(x, y);
-						local di = 1;
-						while di <= 6 do
-							local np = Map.GetPlot(x + dirs[di][1], y + dirs[di][2]);
-							if np ~= nil and np:GetFeatureType() == FeatureTypes.FEATURE_FOREST then
-								nF = nF + 1;
-							end
-							di = di + 1;
-						end
-						if nF >= 3 then
-							local fillP = 48;
-							local xN = 0;
-							if iW > 2 then
-								xN = x / (iW * 0.5);
-							end
-							local yN = 0;
-							if iH > 1 then
-								yN = y / (iH - 1);
-							end
-							if xN <= 0.22 and yN <= 0.48 then
-								fillP = 64;
-							end
-							if Map.Rand(100, "Snaky Forest Fill") < fillP then
-								plot:SetFeatureType(FeatureTypes.FEATURE_FOREST, -1);
-							end
-						end
-					end
-				end
-			end
-			x = x + 1;
-		end
-		y = y + 1;
-	end
-	SnakyPlaceForestPeaks(iW, iH, skip, mirrored);
-	SnakyGrassNearWater(iW, iH, skip, mirrored);
-	local biomeDist = SnakyTundraDistField(iW, iH);
-	SnakyPlaceMarshBiome(iW, iH, skip, mirrored, biomeDist);
-	SnakyPlaceDesertBiome(iW, iH, skip, mirrored, biomeDist);
-	SnakyCleanupSeparatorPockets(iW, iH, skip, mirrored);
-	CopyWestToEast();
-	StripSnakySeparatorFeatures();
-	WeeveeDbg("AddSnakyFeatures done");
 end
 ------------------------------------------------------------------------------
 function AddFrostyForests()
@@ -12715,9 +12340,9 @@ function ThinMireDenseForest(iW, iH, skip)
 					local neigh = CountFeatureNeighbors(plot, FeatureTypes.FEATURE_FOREST);
 					local chance = 0;
 					if neigh >= 6 then
-						chance = 10;
+						chance = 30;
 					elseif neigh >= 5 then
-						chance = 5;
+						chance = 15;
 					end
 					if chance > 0 and Map.Rand(100, "Mire Dense Forest Thin") < chance then
 						plot:SetFeatureType(FeatureTypes.NO_FEATURE, -1);
@@ -13667,7 +13292,12 @@ function AddMireFeatures()
 					if plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
 						if band == 1 then
 							table.insert(spikePlots, plot);
-							if y >= iH - 3 and WaterAllowedAtX(x) and plot:IsCoastalLand() == false and Map.Rand(95, "Mire Ice Pond") == 0 then
+							-- Small icy ponds scattered through the tundra band
+							-- itself (not just the back-coast edge) -- was a
+							-- ~1% chance across only the outermost 3 rows,
+							-- easy to never see in practice; widened to a
+							-- 5-row band at a more noticeable ~5% chance.
+							if y >= iH - 5 and WaterAllowedAtX(x) and plot:IsCoastalLand() == false and Map.Rand(20, "Mire Ice Pond") == 0 then
 								plot:SetPlotType(PlotTypes.PLOT_OCEAN, false, false);
 								plot:SetTerrainType(TerrainTypes.TERRAIN_COAST, false, false);
 								plot:SetFeatureType(FeatureTypes.FEATURE_ICE, -1);
@@ -16535,7 +16165,7 @@ function StripBarrierResources()
 		end
 		y = y + 1;
 	end
-	if IsSnaky() then
+	if IsBramble() then
 		local y = 0;
 		while y < iH do
 			local x = 0;
@@ -16556,6 +16186,34 @@ function StripBarrierResources()
 		end
 	end
 	print("Barrier resources stripped:", n);
+end
+------------------------------------------------------------------------------
+-- True final word on "no resource ever on the Bramble separator" -- see the
+-- call site's comment for why StripBarrierResources' own Bramble handling
+-- (much earlier) isn't enough on its own.
+function StripBrambleSeparatorResources()
+	if IsBramble() == false then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local mirrored = (DEF_MIRRORED == 1);
+	local n = 0;
+	local y = 0;
+	while y < iH do
+		local x = brambleLo[y];
+		while x <= brambleHi[y] do
+			if MirrorOwnsPlot(x, y, mirrored, iW) then
+				local plot = Map.GetPlot(x, y);
+				if plot ~= nil and plot:GetResourceType(-1) ~= -1 then
+					plot:SetResourceType(-1);
+					n = n + 1;
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	print("Bramble separator resources stripped (final pass):", n);
 end
 ------------------------------------------------------------------------------
 function StripOasisBarrierForests()
@@ -16862,8 +16520,8 @@ function PlaceMurkTundraLakeFish()
 	print("Murk tundra lake fish: lakes=", lakes, " added=", placed);
 end
 ------------------------------------------------------------------------------
-function PlaceSnakySaltFish()
-	if IsSnaky() == false then
+function PlaceBrambleSaltFish()
+	if IsBramble() == false then
 		return
 	end
 	local fishID = GameInfoTypes["RESOURCE_FISH"];
@@ -16911,7 +16569,7 @@ function PlaceSnakySaltFish()
 		placed = placed + 1;
 		i = i + 1;
 	end
-	print("Snaky salt fish:", nHave, "/", nTiles, " added", placed);
+	print("Bramble salt fish:", nHave, "/", nTiles, " added", placed);
 end
 ------------------------------------------------------------------------------
 function PlaceMurkTundraSheepStone()
@@ -17750,7 +17408,7 @@ function ClearRiversNearBarrier()
 			end
 		end
 	end
-	if IsSnaky() then
+	if IsBramble() then
 		local y = 0;
 		while y < iH do
 			local x = 0;
@@ -17959,7 +17617,8 @@ function StartPlotSystem()
 	WeeveeDbgCall("WastelandTundraStartHillForest", function() WastelandTundraStartHillForest(start_plot_database) end);
 	WeeveeDbgCall("AddSnowForests", AddSnowForests);
 	WeeveeDbgCall("StripOasisBarrierForests", StripOasisBarrierForests);
-	WeeveeDbgCall("StripSnakySeparatorFeatures", StripSnakySeparatorFeatures);
+	WeeveeDbgCall("StripBrambleSeparatorFeatures", StripBrambleSeparatorFeatures);
+	WeeveeDbgCall("PlaceBrambleSaltFish", PlaceBrambleSaltFish);
 	WeeveeDbgCall("ForestTundraSeparatorResources", ForestTundraSeparatorResources);
 	WeeveeDbgCall("AddBarrierOases", AddBarrierOases);
 	WeeveeDbgCall("AddWastelandFallout", AddWastelandFallout);
@@ -17983,6 +17642,13 @@ function StartPlotSystem()
 	WeeveeDbgCall("ConvertFlatDesertSaltCopper", ConvertFlatDesertSaltCopper);
 	WeeveeDbgCall("StripIllegalMountainResources", StripIllegalMountainResources);
 	WeeveeDbgCall("StripInvalidWetFeatures", StripInvalidWetFeatures);
+	-- Same reasoning as CapSeaResources below: StripBarrierResources (much
+	-- earlier, before AddForestToResource/EnsureLuxuryQuota/
+	-- EnsureStartLuxuryFloor) only catches what existed at that point --
+	-- any luxury-rescue pass after it can still add a resource onto the
+	-- separator strip. This is the true final word on "never a resource on
+	-- the strip", run after every pass that could add one.
+	WeeveeDbgCall("StripBrambleSeparatorResources", StripBrambleSeparatorResources);
 	-- Runs last, not before the luxury-quota/floor passes above: any of them
 	-- can place a pearls/whale/crab to help hit a target, and a sea-resource
 	-- cap that runs before that can't catch what gets added after it.
