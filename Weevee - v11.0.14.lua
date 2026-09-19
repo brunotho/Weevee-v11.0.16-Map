@@ -52,6 +52,7 @@ function WeeveeDbgReset()
 	WeeveeDbgOpen("w");
 	WeeveeDbg("weevee dbg start");
 	TiltedResetLine();
+	WeeveeDbgPersist("===== NEW ROLL =====");
 end
 ------------------------------------------------------------------------------
 -- Separate, append-only log that survives across multiple map rolls (unlike
@@ -7889,6 +7890,64 @@ function IsWeeveeLuxuryID(res)
 	return Game.GetResourceUsageType(res) == ResourceUsageTypes.RESOURCEUSAGE_LUXURY;
 end
 ------------------------------------------------------------------------------
+-- Shared by every late strip/safety-net pass that used to delete a luxury
+-- outright once it landed somewhere no longer legal (barrier column, mountain,
+-- a start tile, ...). Moves the resource to a nearby legal tile instead, so a
+-- region's already-placed luxury count survives generation instead of just
+-- vanishing. `isBanned(x, y)` lets a caller reject candidates inside whatever
+-- zone it's enforcing (barrier columns, Bramble separator, ...); every
+-- candidate is also barred from landing on any major civ's start plot.
+-- Returns false (original tile untouched) only when no legal tile exists
+-- within radius -- the caller is still responsible for clearing the original
+-- tile itself in that case, a genuine, uncompensated loss.
+function TryRelocateLuxury(plot, isBanned, maxRadius)
+	if plot == nil then
+		return false
+	end
+	local res = plot:GetResourceType(-1);
+	if IsWeeveeLuxuryID(res) == false then
+		return false
+	end
+	local amt = plot:GetNumResource();
+	if amt == nil or amt < 1 then
+		amt = 1;
+	end
+	local sx, sy = plot:GetX(), plot:GetY();
+	local wasWater = plot:IsWater();
+	local radius = maxRadius or 5;
+	local cands = {};
+	local y = sy - radius;
+	while y <= sy + radius do
+		local x = sx - radius;
+		while x <= sx + radius do
+			local d = Map.PlotDistance(sx, sy, x, y);
+			if d >= 1 and d <= radius then
+				local cand = Map.GetPlot(x, y);
+				if cand ~= nil
+					and cand:IsWater() == wasWater
+					and cand:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
+					and cand:GetResourceType(-1) == -1
+					and cand:CanHaveResource(res)
+					and PlotIsMajorStart(cand) == false
+					and (isBanned == nil or isBanned(x, y) == false) then
+					table.insert(cands, cand);
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	if #cands < 1 then
+		return false
+	end
+	if #cands > 1 then
+		cands = GetShuffledCopyOfTable(cands);
+	end
+	cands[1]:SetResourceType(res, amt);
+	plot:SetResourceType(-1);
+	return true
+end
+------------------------------------------------------------------------------
 function LuxuryPlayableMaxX(iW)
 	if DEF_MIRRORED == 1 then
 		return math.floor(iW / 2);
@@ -8234,7 +8293,119 @@ function EnsureLuxuryQuota()
 	end
 	local ok, u, d, t = LuxuryQuotaMet();
 	print("Luxury quota pad:", u, "/", wantU, "unique", d, "/", wantD, "dup", t, "/", wantT, "trip", "ok", tostring(ok));
+	-- print() isn't captured anywhere persistent in this setup (Lua.log stays
+	-- essentially empty) -- this is called twice per generation (once in the
+	-- normal pipeline, again as "EnsureLuxuryQuota-postRegionalForce" at the
+	-- very end), so the first logged line per roll is the pre-regional-force
+	-- snapshot and the second is the true final state.
+	WeeveeDbgPersist("EnsureLuxuryQuota unique=" .. u .. "/" .. wantU .. " dup=" .. d .. "/" .. wantD .. " trip=" .. t .. "/" .. wantT .. " ok=" .. tostring(ok));
 	return ok
+end
+------------------------------------------------------------------------------
+-- EnsureLuxuryQuota only ever pads upward toward the rolled unique/dup/trip
+-- targets, never trims. That was fine when the targets were the only thing
+-- driving these counts, but EnsureRegionalLuxuryTarget's guaranteed 3
+-- regional types (each forced to ~5-7 copies) structurally push all three
+-- counts up by construction, on top of whatever the roll actually wanted --
+-- and since nothing ever removes anything, the map's overall luxury density
+-- can only ratchet upward roll after roll, making a roll that lands at the
+-- low end of the accepted ranges (e.g. exactly 3 triplicates) effectively
+-- impossible even when that's what got rolled. Runs last, once every other
+-- luxury pass is done: trims non-regional (and non-Marble) excess back down
+-- toward the actual rolled target, one category at a time (triplicate
+-- first, since reducing a triplicate-tier type can also resolve dup/unique
+-- overshoot as a side effect, then duplicate, then unique), always removing
+-- from whichever type sits at the bare minimum for that tier (count exactly
+-- 3, 2, or 1) so a type far above threshold is never touched. The 3
+-- guaranteed regional types are never eligible -- this only ever removes
+-- the count OTHER passes (random/city-state placement, or padding) added
+-- beyond what the roll's own target called for.
+function TrimLuxuryQuotaExcess(asp)
+	if asp == nil or asp.region_luxury_assignment == nil then
+		return
+	end
+	local wantU, wantD, wantT = ResolveLuxTargets();
+	local counts, nUnique, nDup, nTrip = GatherLuxuryTiers();
+	local protected = {};
+	local rn = 1;
+	while rn <= asp.iNumCivs do
+		local lid = asp.region_luxury_assignment[rn];
+		if lid ~= nil then
+			protected[lid] = true;
+		end
+		rn = rn + 1;
+	end
+	if asp.marble_ID ~= nil then
+		protected[asp.marble_ID] = true;
+	end
+	local iW, iH = Map.GetGridSize();
+	local maxX = LuxuryPlayableMaxX(iW);
+	local function removeOneCopy(resID)
+		local y = 0;
+		while y < iH do
+			local x = 0;
+			while x <= maxX do
+				local plot = Map.GetPlot(x, y);
+				if plot ~= nil and plot:GetResourceType(-1) == resID then
+					plot:SetResourceType(-1);
+					return true
+				end
+				x = x + 1;
+			end
+			y = y + 1;
+		end
+		return false
+	end
+	local nTrimmed = 0;
+	while nTrip > wantT do
+		local target = nil;
+		local resID, n;
+		for resID, n in pairs(counts) do
+			if n == 3 and protected[resID] ~= true then
+				target = resID;
+				break
+			end
+		end
+		if target == nil or removeOneCopy(target) == false then
+			break
+		end
+		counts[target] = counts[target] - 1;
+		nTrip = nTrip - 1;
+		nTrimmed = nTrimmed + 1;
+	end
+	while nDup > wantD do
+		local target = nil;
+		local resID, n;
+		for resID, n in pairs(counts) do
+			if n == 2 and protected[resID] ~= true then
+				target = resID;
+				break
+			end
+		end
+		if target == nil or removeOneCopy(target) == false then
+			break
+		end
+		counts[target] = counts[target] - 1;
+		nDup = nDup - 1;
+		nTrimmed = nTrimmed + 1;
+	end
+	while nUnique > wantU do
+		local target = nil;
+		local resID, n;
+		for resID, n in pairs(counts) do
+			if n == 1 and protected[resID] ~= true then
+				target = resID;
+				break
+			end
+		end
+		if target == nil or removeOneCopy(target) == false then
+			break
+		end
+		counts[target] = nil;
+		nUnique = nUnique - 1;
+		nTrimmed = nTrimmed + 1;
+	end
+	WeeveeDbgPersist("TrimLuxuryQuotaExcess trimmed=" .. nTrimmed .. " final unique=" .. nUnique .. "/" .. wantU .. " dup=" .. nDup .. "/" .. wantD .. " trip=" .. nTrip .. "/" .. wantT);
 end
 ------------------------------------------------------------------------------
 function EnsureStartLuxuryFloor()
@@ -8370,6 +8541,641 @@ function EnsureStartLuxuryFloor()
 	print("Start luxury floor added:", nPad);
 end
 ------------------------------------------------------------------------------
+-- Vanilla's own region-wide/start-tile luxury placement (inside
+-- PlaceResourcesAndCityStates) tracks its own shortfall internally
+-- (PlaceSpecificNumberOfResources returns how many of a target amount it
+-- couldn't place) but only logs that number and gives up once its own
+-- primary/secondary/tertiary/quaternary plot-list tiers run dry -- on a
+-- Small map with few civs those tiers are often too thin to reach vanilla's
+-- own target. Runs last, once every start plot is final and every other
+-- strip/cap pass has already had its say: recomputes each west region's
+-- actual on-map count of its assigned regional luxury from scratch and, for
+-- any shortfall, forces the rest into a plot -- empty tiles first, and only
+-- "bouncing" (evicting, relocating first if the occupant is itself a
+-- luxury) an occupied one if no empty legal tile is left, then a legalizing
+-- edit (see tryTerraformPlace) as a final resort.
+--
+-- Deliberately never touches anything within radius 3 of any capital.
+-- Vanilla's own start-tile pass plus EnsureStartLuxuryFloor already reliably
+-- build the classic 3 (regional) + 1 (other) near-capital pattern on their
+-- own, before this function ever runs -- an earlier version of this
+-- function also tried to manage that ring directly (force/bounce/trim/retry
+-- toward a "3 near" guarantee) and that was the wrong call: it kept
+-- introducing new near-capital problems (overshoot, undershoot, cross-region
+-- collateral damage) in territory that was already working. This only tops
+-- up the region-wide total from outside that ring, so it can only ever add
+-- to what vanilla already built near the capital, never rearrange it.
+--
+-- Region-independent by design otherwise: it never consults the region's own
+-- plot-list machinery, just raw proximity to the capital, so a thin/oddly
+-- shaped region can't starve it the way vanilla's tiered lists can. Global
+-- unique/dup/triplicate ranges get disrupted by the bouncing, so the caller
+-- is expected to run EnsureLuxuryQuota() again afterward to rebalance.
+function EnsureRegionalLuxuryTarget(asp)
+	if asp == nil or asp.region_luxury_assignment == nil or asp.player_ID_list == nil then
+		return
+	end
+	local radius = 6;
+	local iW, iH = Map.GetGridSize();
+	local maxX = iW - 1;
+	if DEF_MIRRORED == 1 then
+		maxX = math.floor(iW / 2) - 1;
+	end
+	local function inBarrier(x, y)
+		local skip = RowMireSkip(iW, y);
+		return skip[x] == true;
+	end
+	-- This function's whole search only ever operates at radius 4 and
+	-- beyond (see the "never touch the near ring" note below), which can
+	-- still reach out far enough to overlap a neighboring civ's own
+	-- radius-3 ring when starts are close to the 7-tile minimum spacing.
+	-- Never touch a tile within `buf` of ANY capital, ours or someone
+	-- else's -- radius 4+ can never be within 3 of the capital doing the
+	-- searching anyway, so no "own capital" exception is needed. `buf`
+	-- defaults to 3 (exactly the other capital's own ring) for the normal-
+	-- range search; the far-reaching escalation/terraform tiers pass a
+	-- wider buffer (5) so a placement that has to travel that far doesn't
+	-- end up reading as "sitting right next to a different player's stuff"
+	-- even though it's technically outside their strict ring.
+	local function nearAnyCapital(x, y, buf)
+		buf = buf or 3;
+		local pi = 0;
+		while pi < GameDefines.MAX_MAJOR_CIVS do
+			local p = Players[pi];
+			if p ~= nil and p:IsAlive() then
+				local otherSp = p:GetStartingPlot();
+				if otherSp ~= nil and Map.PlotDistance(x, y, otherSp:GetX(), otherSp:GetY()) <= buf then
+					return true
+				end
+			end
+			pi = pi + 1;
+		end
+		return false
+	end
+	-- Vanilla's own region-wide scatter (PlaceSpecificNumberOfResources)
+	-- keeps same-type luxuries a few tiles apart via its "impact table"
+	-- spacing system -- our forcing bypasses that machinery entirely (it
+	-- just calls SetResourceType directly), so without an equivalent check
+	-- here, several forced copies of the same resource can land shoulder to
+	-- shoulder wherever the only eligible land happens to be, reading as an
+	-- unnaturally dense cluster instead of a spread-out region-wide total.
+	local function tooCloseToSame(x, y, resID, minDist)
+		local yy = y - minDist;
+		while yy <= y + minDist do
+			local xx = x - minDist;
+			while xx <= x + minDist do
+				if Map.PlotDistance(x, y, xx, yy) < minDist then
+					local plot = Map.GetPlot(xx, yy);
+					if plot ~= nil and plot:GetResourceType(-1) == resID then
+						return true
+					end
+				end
+				xx = xx + 1;
+			end
+			yy = yy + 1;
+		end
+		return false
+	end
+	local counts = {};
+	local y = 0;
+	while y < iH do
+		local x = 0;
+		while x <= maxX do
+			local plot = Map.GetPlot(x, y);
+			if plot ~= nil then
+				local res = plot:GetResourceType(-1);
+				if res ~= -1 then
+					counts[res] = (counts[res] or 0) + 1;
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	-- A tile holding ANY region's assigned regional luxury is off-limits as
+	-- a bounce/terraform source for every OTHER region's search -- without
+	-- this, a later region's wide Phase 2/escalation reach (radius up to
+	-- `radius`+3, easily overlapping a neighbor 7-9 tiles away) can evict an
+	-- earlier region's already-correctly-placed copy as collateral, and if
+	-- the eviction's own relocation attempt fails, delete it outright with
+	-- no bookkeeping update for the region that already finished processing.
+	-- That's what caused final counts reported here to disagree with the
+	-- fresh recount taken afterward in LogRegionalLuxuryCounts.
+	local allRegionalLuxIDs = {};
+	do
+		local rn = 1;
+		while rn <= asp.iNumCivs do
+			local lid = asp.region_luxury_assignment[rn];
+			if lid ~= nil then
+				allRegionalLuxIDs[lid] = true;
+			end
+			rn = rn + 1;
+		end
+	end
+	local function regionalTarget(region_number, resID)
+		local target_list = asp:GetRegionLuxuryTargetNumbers();
+		local base = 0;
+		if target_list ~= nil and target_list[asp.iNumCivs] ~= nil then
+			base = target_list[asp.iNumCivs];
+		end
+		local split = 1;
+		if asp.luxury_assignment_count ~= nil and asp.luxury_assignment_count[resID] ~= nil and asp.luxury_assignment_count[resID] > 0 then
+			split = asp.luxury_assignment_count[resID];
+		end
+		local fertBonus = 0;
+		if asp.luxury_low_fert_compensation ~= nil and asp.luxury_low_fert_compensation[resID] ~= nil then
+			fertBonus = 0.5 * asp.luxury_low_fert_compensation[resID];
+		end
+		-- Vanilla subtracts region_low_fert_compensation here because ITS
+		-- start-tile pass already added that same amount on top of the flat
+		-- 2/3 base (a poor region gets extra copies at the capital instead of
+		-- in the region-wide scatter). Our `atStart` below stays flat at the
+		-- base, never adding that compensation back in, so subtracting it a
+		-- second time here would double-count the deduction and undershoot
+		-- vanilla's true total (this was exactly the earlier 5/7 bug: targets
+		-- landing on 5 or 7 instead of a stable 6 whenever a region rolled a
+		-- fertility bonus). Leaving it out here makes the two sides cancel
+		-- correctly, matching vanilla's actual (start + region-wide) total.
+		local regionWide = math.floor((base + fertBonus) / split);
+		regionWide = regionWide - 1;
+		if asp.resource_setting == 1 then
+			regionWide = regionWide - 1;
+		elseif asp.resource_setting == 3 then
+			regionWide = regionWide + 2;
+		end
+		regionWide = math.max(2, regionWide);
+		local atStart = 2;
+		if asp.resource_setting == 4 then
+			atStart = 3;
+		end
+		return regionWide + atStart;
+	end
+	local function tryBounce(sp, resID, minRadius, maxRadius, neighborBuf)
+		local sx, sy = sp:GetX(), sp:GetY();
+		local emptyCands, occupiedCands = {}, {};
+		local yy = sy - maxRadius;
+		while yy <= sy + maxRadius do
+			local xx = sx - maxRadius;
+			while xx <= sx + maxRadius do
+				local d = Map.PlotDistance(sx, sy, xx, yy);
+				if d >= minRadius and d <= maxRadius then
+					local plot = Map.GetPlot(xx, yy);
+					if plot ~= nil
+						and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
+						and PlotIsMajorStart(plot) == false
+						and inBarrier(xx, yy) == false
+						and nearAnyCapital(xx, yy, neighborBuf) == false
+						and tooCloseToSame(xx, yy, resID, 2) == false
+						and plot:CanHaveResource(resID) then
+						local existingRes = plot:GetResourceType(-1);
+						if existingRes == -1 then
+							table.insert(emptyCands, plot);
+						elseif existingRes ~= resID and allRegionalLuxIDs[existingRes] ~= true then
+							table.insert(occupiedCands, plot);
+						end
+					end
+				end
+				xx = xx + 1;
+			end
+			yy = yy + 1;
+		end
+		if #emptyCands > 0 then
+			if #emptyCands > 1 then
+				emptyCands = GetShuffledCopyOfTable(emptyCands);
+			end
+			emptyCands[1]:SetResourceType(resID, 1);
+			return true
+		end
+		if #occupiedCands < 1 then
+			return false
+		end
+		if #occupiedCands > 1 then
+			occupiedCands = GetShuffledCopyOfTable(occupiedCands);
+		end
+		local bounced = occupiedCands[1];
+		if IsWeeveeLuxuryID(bounced:GetResourceType(-1)) then
+			-- Keep the displaced luxury out of every capital's own ring --
+			-- with no exclusion here its relocation search could land right
+			-- back inside one, planting a stray foreign type into a spawn
+			-- cluster that never needed touching.
+			local function banNearCapitalOrBarrier(x, y)
+				return inBarrier(x, y) or nearAnyCapital(x, y, neighborBuf);
+			end
+			TryRelocateLuxury(bounced, banNearCapitalOrBarrier, radius + 6);
+		end
+		if bounced:GetResourceType(-1) ~= -1 then
+			bounced:SetResourceType(-1);
+		end
+		bounced:SetResourceType(resID, 1);
+		return true
+	end
+	local function countNear(sp, resID, r)
+		local sx, sy = sp:GetX(), sp:GetY();
+		local n = 0;
+		local yy = sy - r;
+		while yy <= sy + r do
+			local xx = sx - r;
+			while xx <= sx + r do
+				if Map.PlotDistance(sx, sy, xx, yy) <= r then
+					local plot = Map.GetPlot(xx, yy);
+					if plot ~= nil and plot:GetResourceType(-1) == resID then
+						n = n + 1;
+					end
+				end
+				xx = xx + 1;
+			end
+			yy = yy + 1;
+		end
+		return n;
+	end
+	-- Every terrain and feature the ruleset itself says legalizes resID,
+	-- queried straight from the loaded data instead of a hardcoded guess --
+	-- this covers any luxury (including modded ones like Amber/Jade/Lapis/
+	-- Obsidian) automatically, without needing to know its specific
+	-- requirement in advance. Results are cached per resID since the
+	-- underlying tables never change mid-generation.
+	local terrainCache, featureCache = {}, {};
+	local function resourceLegalTerrains(resID)
+		if terrainCache[resID] ~= nil then
+			return terrainCache[resID]
+		end
+		local list = {};
+		local resType = GameInfo.Resources[resID] and GameInfo.Resources[resID].Type;
+		if resType ~= nil then
+			for row in GameInfo.Resource_TerrainBooleans() do
+				if row.ResourceType == resType then
+					local t = GameInfoTypes[row.TerrainType];
+					if t ~= nil then
+						table.insert(list, t);
+					end
+				end
+			end
+		end
+		terrainCache[resID] = list;
+		return list
+	end
+	local function resourceLegalFeatures(resID)
+		if featureCache[resID] ~= nil then
+			return featureCache[resID]
+		end
+		local list = {};
+		local resType = GameInfo.Resources[resID] and GameInfo.Resources[resID].Type;
+		if resType ~= nil then
+			for row in GameInfo.Resource_FeatureBooleans() do
+				if row.ResourceType == resType then
+					local f = GameInfoTypes[row.FeatureType];
+					if f ~= nil then
+						table.insert(list, f);
+					end
+				end
+			end
+		end
+		featureCache[resID] = list;
+		return list
+	end
+	local function plotLatitude(y)
+		return math.abs((iH / 2) - y) / (iH / 2);
+	end
+	-- Last resort, tried only once every plain bounce/escalation attempt has
+	-- already failed: legalize an otherwise-unusable tile by editing it,
+	-- mirroring the precedent already set elsewhere in this file
+	-- (EnsureLuxuryQuota's tryPlaceHard/tryPlaceForceTriplicate convert plot
+	-- type to hills for the same reason). Tries every legalizing edit for
+	-- resID on a single plot, in place, leaving the edit applied on success
+	-- or fully reverted on failure. Hills stays a separate first try (plot
+	-- type, not covered by Resource_TerrainBooleans) and is unrestricted.
+	-- Every OTHER terrain/feature comes from the ruleset's own legal list
+	-- for resID; Tundra and Snow (terrain) and Jungle (feature) are the only
+	-- climate-sensitive ones in this ruleset, so those are skipped unless
+	-- the tile's own latitude already fits (poleward for Tundra/Snow,
+	-- equatorial for Jungle) -- a rescue edit should never paint jungle near
+	-- a pole or tundra onto a tropical tile. Everything else the ruleset
+	-- allows (Forest, Marsh, Desert, Plains, Oasis, Flood Plains, ...) is
+	-- tried unrestricted.
+	local function tryTerraformOnPlot(plot, resID)
+		if plot:GetPlotType() == PlotTypes.PLOT_LAND then
+			plot:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
+			if plot:CanHaveResource(resID) then
+				return true
+			end
+			plot:SetPlotType(PlotTypes.PLOT_LAND, false, false);
+		end
+		if plot:GetFeatureType() == FeatureTypes.NO_FEATURE then
+			local oldTerrain = plot:GetTerrainType();
+			local terrains = resourceLegalTerrains(resID);
+			local ti = 1;
+			while ti <= #terrains do
+				local t = terrains[ti];
+				if t ~= oldTerrain then
+					local isPolar = (t == TerrainTypes.TERRAIN_TUNDRA or t == TerrainTypes.TERRAIN_SNOW);
+					if (isPolar == false) or plotLatitude(plot:GetY()) > 0.5 then
+						plot:SetTerrainType(t, false, false);
+						if plot:CanHaveResource(resID) then
+							return true
+						end
+						plot:SetTerrainType(oldTerrain, false, false);
+					end
+				end
+				ti = ti + 1;
+			end
+		end
+		if plot:GetFeatureType() == FeatureTypes.NO_FEATURE then
+			local features = resourceLegalFeatures(resID);
+			local fi = 1;
+			while fi <= #features do
+				local f = features[fi];
+				local isJungle = (f == FeatureTypes.FEATURE_JUNGLE);
+				-- Forest, like Hills above, is climate-neutral enough in
+				-- this ruleset to plant regardless of the tile's terrain --
+				-- CanHaveFeature would refuse it on Desert/Snow specifically,
+				-- but CanHaveResource right below is the gate that actually
+				-- matters, and reverts it immediately if it didn't help.
+				-- Every other feature keeps the normal CanHaveFeature check
+				-- (Flood Plains needs river adjacency, Oasis has its own
+				-- rules, etc. -- forcing those regardless would risk a
+				-- genuinely broken-looking tile, not just an unusual one).
+				local isForest = (f == FeatureTypes.FEATURE_FOREST);
+				if ((isJungle == false) or plotLatitude(plot:GetY()) < 0.5) and (isForest or plot:CanHaveFeature(f)) then
+					plot:SetFeatureType(f, -1);
+					if plot:CanHaveResource(resID) then
+						return true
+					end
+					plot:SetFeatureType(FeatureTypes.NO_FEATURE, -1);
+				end
+				fi = fi + 1;
+			end
+		end
+		return false
+	end
+	local function tryTerraformPlace(sp, resID, minRadius, maxRadius, neighborBuf)
+		local sx, sy = sp:GetX(), sp:GetY();
+		local emptyCands, occupiedCands = {}, {};
+		local yy = sy - maxRadius;
+		while yy <= sy + maxRadius do
+			local xx = sx - maxRadius;
+			while xx <= sx + maxRadius do
+				local d = Map.PlotDistance(sx, sy, xx, yy);
+				if d >= minRadius and d <= maxRadius then
+					local plot = Map.GetPlot(xx, yy);
+					if plot ~= nil
+						and plot:IsWater() == false
+						and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
+						and PlotIsMajorStart(plot) == false
+						and inBarrier(xx, yy) == false
+						and nearAnyCapital(xx, yy, neighborBuf) == false
+						and tooCloseToSame(xx, yy, resID, 2) == false then
+						local existingRes = plot:GetResourceType(-1);
+						if existingRes == -1 then
+							table.insert(emptyCands, plot);
+						elseif existingRes ~= resID and allRegionalLuxIDs[existingRes] ~= true then
+							table.insert(occupiedCands, plot);
+						end
+					end
+				end
+				xx = xx + 1;
+			end
+			yy = yy + 1;
+		end
+		if #emptyCands > 1 then
+			emptyCands = GetShuffledCopyOfTable(emptyCands);
+		end
+		local i = 1;
+		while i <= #emptyCands do
+			if tryTerraformOnPlot(emptyCands[i], resID) then
+				emptyCands[i]:SetResourceType(resID, 1);
+				return true
+			end
+			i = i + 1;
+		end
+		-- As a last resort, terraforming can also legalize an occupied tile
+		-- and bounce whatever was there.
+		if #occupiedCands > 1 then
+			occupiedCands = GetShuffledCopyOfTable(occupiedCands);
+		end
+		i = 1;
+		while i <= #occupiedCands do
+			local plot = occupiedCands[i];
+			if tryTerraformOnPlot(plot, resID) then
+				if IsWeeveeLuxuryID(plot:GetResourceType(-1)) then
+					local function banNearCapitalOrBarrier(x, y)
+						return inBarrier(x, y) or nearAnyCapital(x, y, neighborBuf);
+					end
+					TryRelocateLuxury(plot, banNearCapitalOrBarrier, radius + 6);
+				end
+				if plot:GetResourceType(-1) ~= -1 then
+					plot:SetResourceType(-1);
+				end
+				plot:SetResourceType(resID, 1);
+				return true
+			end
+			i = i + 1;
+		end
+		return false
+	end
+	-- Obsidian keeps coming back with BOTH legal lists empty from
+	-- resourceLegalTerrains/Features -- its legality isn't governed by
+	-- either table, and a mountain-adjacency guess (tried and removed) came
+	-- back with the same result: still 4/6, no better than doing nothing.
+	-- Rather than keep guessing at the real rule, this forces it directly:
+	-- any Plains or Desert tile within radius 8, resource-legality checks
+	-- skipped entirely (that's the whole reason this exists -- CanHaveResource
+	-- has been uninformative for this specific resource), still respecting
+	-- the barrier/capital-ring/spacing rules everything else does.
+	local obsidianID = GameInfoTypes["RESOURCE_OBSIDIAN"];
+	local function tryForcePlainsDesert(sp, resID, maxRadius, neighborBuf)
+		local sx, sy = sp:GetX(), sp:GetY();
+		local emptyCands, occupiedCands = {}, {};
+		local yy = sy - maxRadius;
+		while yy <= sy + maxRadius do
+			local xx = sx - maxRadius;
+			while xx <= sx + maxRadius do
+				local d = Map.PlotDistance(sx, sy, xx, yy);
+				if d >= 4 and d <= maxRadius then
+					local plot = Map.GetPlot(xx, yy);
+					if plot ~= nil
+						and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
+						and (plot:GetTerrainType() == TerrainTypes.TERRAIN_PLAINS or plot:GetTerrainType() == TerrainTypes.TERRAIN_DESERT)
+						and PlotIsMajorStart(plot) == false
+						and inBarrier(xx, yy) == false
+						and nearAnyCapital(xx, yy, neighborBuf) == false
+						and tooCloseToSame(xx, yy, resID, 2) == false then
+						local existingRes = plot:GetResourceType(-1);
+						if existingRes == -1 then
+							table.insert(emptyCands, plot);
+						elseif existingRes ~= resID and allRegionalLuxIDs[existingRes] ~= true then
+							table.insert(occupiedCands, plot);
+						end
+					end
+				end
+				xx = xx + 1;
+			end
+			yy = yy + 1;
+		end
+		if #emptyCands > 0 then
+			if #emptyCands > 1 then
+				emptyCands = GetShuffledCopyOfTable(emptyCands);
+			end
+			emptyCands[1]:SetResourceType(resID, 1);
+			return true
+		end
+		if #occupiedCands < 1 then
+			return false
+		end
+		if #occupiedCands > 1 then
+			occupiedCands = GetShuffledCopyOfTable(occupiedCands);
+		end
+		local bounced = occupiedCands[1];
+		if IsWeeveeLuxuryID(bounced:GetResourceType(-1)) then
+			local function banNearCapitalOrBarrier(x, y)
+				return inBarrier(x, y) or nearAnyCapital(x, y, neighborBuf);
+			end
+			TryRelocateLuxury(bounced, banNearCapitalOrBarrier, radius + 6);
+		end
+		if bounced:GetResourceType(-1) ~= -1 then
+			bounced:SetResourceType(-1);
+		end
+		bounced:SetResourceType(resID, 1);
+		return true
+	end
+	local nForced = 0;
+	local region_number = 1;
+	while region_number <= asp.iNumCivs do
+		local playerNum = asp.player_ID_list[region_number];
+		local player = nil;
+		if playerNum ~= nil then
+			player = Players[playerNum];
+		end
+		if player ~= nil and player:IsAlive() then
+			local sp = player:GetStartingPlot();
+			if sp ~= nil and (DEF_MIRRORED ~= 1 or IsMirrorEastSubject(sp:GetX(), sp:GetY()) == false) then
+				local resID = asp.region_luxury_assignment[region_number];
+				if resID ~= nil then
+					local target = regionalTarget(region_number, resID);
+					local have = counts[resID] or 0;
+					-- Never touch anything within radius 3 of this capital:
+					-- vanilla's own start-tile pass plus EnsureStartLuxuryFloor
+					-- already reliably build the classic 3 (regional) + 1
+					-- (other) pattern there on their own, before this function
+					-- runs. An earlier version of this function also tried to
+					-- manage that ring directly (bounce/trim/terraform/retry
+					-- to force a "3 near" guarantee) and that was the wrong
+					-- call -- it kept introducing new near-capital problems
+					-- (overshoot, undershoot, cross-region collateral damage)
+					-- in territory that never needed touching. This only
+					-- tops up the region-wide total, strictly at radius 4+,
+					-- widening the search twice and then trying a legalizing
+					-- edit before accepting a genuine shortfall.
+					while have < target do
+						if tryBounce(sp, resID, 4, radius, 3) then
+							have = have + 1;
+							counts[resID] = have;
+							nForced = nForced + 1;
+						else
+							break
+						end
+					end
+					-- This tier reaches out to radius 12 -- far enough that a
+					-- placement here can otherwise land only 4-5 tiles from a
+					-- DIFFERENT capital even while staying outside their
+					-- strict radius-3 ring, reading as "sitting right next to
+					-- someone else's stuff." Widen the neighbor buffer to 5
+					-- for this tier and the terraform tier below (both only
+					-- fire after the normal-range tier above has already
+					-- failed, so trading a few more candidates for staying
+					-- clearly on this region's own side is worth it). The
+					-- SHORTFALL diagnostic below confirmed this is worth
+					-- doing: some resources (e.g. Silk, legal only on
+					-- Forest) have exactly one legalizing option, so a
+					-- shortfall for them is pure candidate scarcity within
+					-- the search radius, not a missing terraform option --
+					-- more room is the only lever left.
+					while have < target do
+						if tryBounce(sp, resID, radius + 1, radius + 6, 5) then
+							have = have + 1;
+							counts[resID] = have;
+							nForced = nForced + 1;
+						else
+							break
+						end
+					end
+					while have < target do
+						if tryTerraformPlace(sp, resID, 4, radius + 6, 5) then
+							have = have + 1;
+							counts[resID] = have;
+							nForced = nForced + 1;
+						else
+							break
+						end
+					end
+					-- Obsidian specifically, direct force: any Plains/Desert
+					-- tile within radius 8, legality checks skipped.
+					if resID == obsidianID then
+						while have < target do
+							if tryForcePlainsDesert(sp, resID, 8, 5) then
+								have = have + 1;
+								counts[resID] = have;
+								nForced = nForced + 1;
+							else
+								break
+							end
+						end
+					end
+					-- One-time diagnostic for a genuine shortfall that
+					-- survived every tier: dump exactly what the ruleset
+					-- says legalizes this resource, instead of guessing.
+					-- If both lists are non-empty, the bottleneck isn't
+					-- "we don't know what this needs" -- it's more likely a
+					-- combo (e.g. Hills AND a specific terrain together)
+					-- that trying one edit at a time can't reach, or plain
+					-- candidate exhaustion within the search radius.
+					if have < target then
+						local terrainNames, featureNames = {}, {};
+						local tl = resourceLegalTerrains(resID);
+						local ti = 1;
+						while ti <= #tl do
+							local info = GameInfo.Terrains[tl[ti]];
+							table.insert(terrainNames, info ~= nil and info.Type or tostring(tl[ti]));
+							ti = ti + 1;
+						end
+						local fl = resourceLegalFeatures(resID);
+						local fi = 1;
+						while fi <= #fl do
+							local info = GameInfo.Features[fl[fi]];
+							table.insert(featureNames, info ~= nil and info.Type or tostring(fl[fi]));
+							fi = fi + 1;
+						end
+						WeeveeDbgPersist("EnsureRegionalLuxuryTarget SHORTFALL diag Region#" .. region_number .. " LuxID=" .. resID .. " legalTerrains=[" .. table.concat(terrainNames, ",") .. "] legalFeatures=[" .. table.concat(featureNames, ",") .. "]");
+					end
+					local sx, sy = sp:GetX(), sp:GetY();
+					local distToPole = math.min(sy, iH - 1 - sy);
+					local rowSkip = RowMireSkip(iW, sy);
+					local distToBarrier = -1;
+					local col, isSkip;
+					for col, isSkip in pairs(rowSkip) do
+						if isSkip == true then
+							local d = math.abs(sx - col);
+							if distToBarrier == -1 or d < distToBarrier then
+								distToBarrier = d;
+							end
+						end
+					end
+					local resType = "?";
+					if GameInfo.Resources[resID] ~= nil and GameInfo.Resources[resID].Type ~= nil then
+						resType = GameInfo.Resources[resID].Type;
+					end
+					-- nearFinal is read-only here -- it never feeds into any
+					-- forcing decision, purely confirms in the log that
+					-- vanilla's own near-capital shape stayed untouched.
+					local nearFinal = countNear(sp, resID, 3);
+					WeeveeDbgPersist("EnsureRegionalLuxuryTarget Region#" .. region_number .. " LuxID=" .. resID .. " (" .. resType .. ") target=" .. target .. " final=" .. have .. " nearFinal=" .. nearFinal .. " capital=(" .. sx .. "," .. sy .. ") distToPoleEdge=" .. distToPole .. " distToBarrier=" .. distToBarrier);
+				end
+			end
+		end
+		region_number = region_number + 1;
+	end
+	WeeveeDbgPersist("EnsureRegionalLuxuryTarget forced " .. nForced .. " copies total");
+end
+------------------------------------------------------------------------------
 function StripStartTileLuxuries()
 	local n = 0;
 	local pi = 0;
@@ -8457,6 +9263,42 @@ function ConvertFlatDesertSaltCopper()
 		y = y + 1;
 	end
 	print("Flat desert salt/copper to hills:", n);
+end
+------------------------------------------------------------------------------
+-- Any Fur sitting on bare Tundra gets Forest added, regardless of how it
+-- got there (vanilla placement, EnsureRegionalLuxuryTarget's forcing,
+-- EnsureLuxuryQuota padding, ...) or whether a later pass stripped the
+-- feature without checking what resource was underneath. Forced
+-- unconditionally, same "just plant it" reasoning already applied to Forest
+-- elsewhere in this file.
+function EnsureFurOnTundraHasForest()
+	local furID = GameInfoTypes["RESOURCE_FUR"];
+	if furID == nil then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local maxX = iW - 1;
+	if DEF_MIRRORED == 1 then
+		maxX = math.floor(iW / 2) - 1;
+	end
+	local n = 0;
+	local y = 0;
+	while y < iH do
+		local x = 0;
+		while x <= maxX do
+			local plot = Map.GetPlot(x, y);
+			if plot ~= nil
+				and plot:GetResourceType(-1) == furID
+				and plot:GetTerrainType() == TerrainTypes.TERRAIN_TUNDRA
+				and plot:GetFeatureType() ~= FeatureTypes.FEATURE_FOREST then
+				plot:SetFeatureType(FeatureTypes.FEATURE_FOREST, -1);
+				n = n + 1;
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	WeeveeDbg("Fur-on-tundra forced forest: " .. n);
 end
 ------------------------------------------------------------------------------
 function AddWetlandRiverDesert()
@@ -8611,6 +9453,22 @@ function AddFeatures()
 		args.iForestPercent = 0;
 		args.fMarshPercent = 0;
 		args.iOasisPercent = 0;
+	elseif cfg ~= nil and cfg.kind == "snow" then
+		-- Jungle's own latitude gate (FeatureGenerator:AddJunglesAtPlot) only
+		-- allows it within lat < 1/iJungleFactor of the map's vertical center,
+		-- regardless of iJunglePercent (that knob only affects density inside
+		-- the band, not its width). Vanilla's default factor of 5 confines
+		-- jungle to roughly the central 20% of map height -- fine on a normal
+		-- map where luxury-region weighting can freely pick a non-jungle
+		-- civ's own actual mix, but on this map's 3-civs-per-side vertical
+		-- split it leaves the outer (non-central) civ(s) with no jungle at
+		-- all in reach, so a jungle-locked regional luxury (Cocoa, Spices,
+		-- Dye, ...) assigned to one of them can end up impossible to place.
+		-- Lowering the factor widens the band (~20% -> ~33%) and the percent
+		-- bump keeps density reasonable once inside it, so more of the map's
+		-- civs have at least some jungle within their region.
+		args.iJunglePercent = 38;
+		args.iJungleFactor = 3;
 	end
 	local featuregen = FeatureGenerator.Create(args);
 
@@ -17582,6 +18440,7 @@ function StartPlotSystem()
 	WeeveeDbgCall("FixWastelandFloodPlains", FixWastelandFloodPlains);
 	WeeveeDbgCall("AddWastelandTundraForests", AddWastelandTundraForests);
 	WeeveeDbgCall("PlaceResourcesAndCityStates", function() start_plot_database:PlaceResourcesAndCityStates() end);
+	WeeveeDbgCall("LogRegionalLuxuryCounts-postVanilla", function() LogRegionalLuxuryCounts(start_plot_database, "post-vanilla-placement") end);
 	WeeveeDbg("PlaceResources done");
 	WeeveeDbgCall("MaybePlaceStartTileResource", function() MaybePlaceStartTileResource(start_plot_database) end);
 
@@ -17649,6 +18508,11 @@ function StartPlotSystem()
 	WeeveeDbgCall("NudgePlayerStartsMinDist", function() NudgePlayerStartsMinDist(7) end);
 	WeeveeDbgCall("StripNonBonusStartTileResources", StripNonBonusStartTileResources);
 	WeeveeDbgCall("FrostyThawStartResources", FrostyThawStartResources);
+	WeeveeDbgCall("EnsureRegionalLuxuryTarget", function() EnsureRegionalLuxuryTarget(start_plot_database) end);
+	WeeveeDbgCall("EnsureLuxuryQuota-postRegionalForce", EnsureLuxuryQuota);
+	WeeveeDbgCall("TrimLuxuryQuotaExcess", function() TrimLuxuryQuotaExcess(start_plot_database) end);
+	WeeveeDbgCall("EnsureFurOnTundraHasForest", EnsureFurOnTundraHasForest);
+	WeeveeDbgCall("LogRegionalLuxuryCounts-preMirror", function() LogRegionalLuxuryCounts(start_plot_database, "pre-mirror-final") end);
 	WeeveeDbg("before mirror");
 	if DEF_MIRRORED == 1 then
 		WeeveeDbgCall("MirrorPlotsAfterResourcePlacement", MirrorPlotsAfterResourcePlacement);
@@ -17656,6 +18520,63 @@ function StartPlotSystem()
 	WeeveeDbgCall("WeeveeDbgBarrierWidths", WeeveeDbgBarrierWidths);
 	WeeveeDbgCall("WeeveeDbgWaterCount", WeeveeDbgWaterCount);
 	WeeveeDbg("StartPlotSystem done");
+end
+------------------------------------------------------------------------------
+-- Diagnostic for the regional-luxury shortfall investigation. Counts, per
+-- west-side region only (pre-mirror -- the east half is just a copy), how
+-- many tiles currently carry that region's assigned regional luxury type.
+-- Call once right after PlaceResourcesAndCityStates (the vanilla, pre-strip
+-- baseline) and again right before the mirror copy (the final pre-mirror
+-- state) to see how much each strip/cap pass is actually costing per region.
+function LogRegionalLuxuryCounts(asp, stage)
+	if asp == nil or asp.region_luxury_assignment == nil or asp.player_ID_list == nil then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local maxX = iW - 1;
+	if DEF_MIRRORED == 1 then
+		maxX = math.floor(iW / 2) - 1;
+	end
+	local counts = {};
+	local y = 0;
+	while y < iH do
+		local x = 0;
+		while x <= maxX do
+			local plot = Map.GetPlot(x, y);
+			if plot ~= nil then
+				local res = plot:GetResourceType(-1);
+				if res ~= -1 then
+					counts[res] = (counts[res] or 0) + 1;
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	WeeveeDbgPersist("--- Regional Luxury Counts [" .. tostring(stage) .. "] (west half, pre-mirror) ---");
+	local total = 0;
+	local region_number = 1;
+	while region_number <= asp.iNumCivs do
+		local playerNum = asp.player_ID_list[region_number];
+		local player = nil;
+		if playerNum ~= nil then
+			player = Players[playerNum];
+		end
+		if player ~= nil and player:IsAlive() then
+			local sp = player:GetStartingPlot();
+			if sp ~= nil and (DEF_MIRRORED ~= 1 or IsMirrorEastSubject(sp:GetX(), sp:GetY()) == false) then
+				local resID = asp.region_luxury_assignment[region_number];
+				local n = 0;
+				if resID ~= nil then
+					n = counts[resID] or 0;
+				end
+				WeeveeDbgPersist("Region#" .. region_number .. " LuxID=" .. tostring(resID) .. " count=" .. n);
+				total = total + n;
+			end
+		end
+		region_number = region_number + 1;
+	end
+	WeeveeDbgPersist("--- Regional Luxury Total [" .. tostring(stage) .. "]: " .. total .. " ---");
 end
 ------------------------------------------------------------------------------
 -- TEMPORARY diagnostic for the water-budget investigation. Counts final salt
