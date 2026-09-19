@@ -4622,40 +4622,6 @@ function PlaceDiagonalBackWater(plotTypes, iW, iH)
 		si = si + 1;
 	end
 
-	-- A few extra hills tucked into the far west corners -- mirrored
-	-- automatically to the opposite corners via setPlot -- since those
-	-- corners otherwise read noticeably flatter than the rest of the
-	-- mainland.
-	local function addCornerHills(yLo, yHi)
-		local cands = {};
-		local cy = yLo;
-		while cy <= yHi do
-			local cx = 0;
-			while cx <= 5 do
-				if getPlot(cx, cy) == PlotTypes.PLOT_LAND then
-					table.insert(cands, {cx, cy});
-				end
-				cx = cx + 1;
-			end
-			cy = cy + 1;
-		end
-		if #cands < 1 then
-			return
-		end
-		local want = 2 + Map.Rand(2, "DiagWater Corner Hills"); -- 2-3
-		if want > #cands then
-			want = #cands;
-		end
-		local shuffled = GetShuffledCopyOfTable(cands);
-		local i = 1;
-		while i <= want do
-			setPlot(shuffled[i][1], shuffled[i][2], PlotTypes.PLOT_HILLS);
-			i = i + 1;
-		end
-	end
-	addCornerHills(0, 3);
-	addCornerHills(iH - 4, iH - 1);
-
 	local diagLine = "DiagWater: pct=" .. pct .. " westTarget=" .. westTarget .. " inland=" .. nInland
 		.. " usedByInland=" .. usedByInland .. " westBackBudget=" .. westBackBudget
 		.. " bulgeReserve=" .. bulgeReserve .. " bigSize=" .. bigSize .. " smallCount=" .. nSmall
@@ -5513,48 +5479,35 @@ function EnsureStartHillsFloor()
 	end
 end
 -------------------------------------------------------------------------------
--- Cosmetic extra relief for plain Standard only: the far west edge (the
--- three columns nearest the map border, x=0..2) tends to read as visually
--- flat/empty compared to the rest of the continent, so sprinkle a handful of
--- random hills into it. Runs pre-resource-placement (so PlaceResourcesAndCityStates
--- and every later resource pass see the final terrain) and, like everything
--- else in this file that mutates terrain, well before the west-to-east mirror
--- copy -- it never needs its own mirror-awareness since columns 0-2 are always
--- deep inside the canonical west half.
-function AddStandardWestEdgeHills()
-	if IsStandardClimate() == false or IsTiltedMirrorAxis() then
-		return
-	end
-	local iW, iH = Map.GetGridSize();
-	local cands = {};
+-- The back-coast columns (x=0..3) get their water shaped after the tectonics
+-- pass, and every shaper (ShapeNoWrapBackstrip, PlaceDiagonalBackWater, ...)
+-- writes flat PLOT_LAND wherever it reclaims or resets land there, so those
+-- columns lost the hills the hills fractal would have given them. Instead of
+-- patching each shaper, GeneratePlotsByRegion runs the tectonics pass with
+-- the ocean rim temporarily turned back into land, keeps the result for
+-- x=0..3 in `tectonic`, and calls this at the very end: any tile in those
+-- columns that ended up flat land but that the tectonics pass called hills
+-- becomes hills, so surviving back-coast land follows the same hill profile
+-- as the land in the middle. Mountains are deliberately not restored.
+-- Works on the west columns and applies the same change to the 180-degree
+-- mirror tile, matching how the shapers mirror x=0..3.
+function RestoreBackTectonicHills(plotTypes, tectonic, iW, iH)
 	local y = 0;
 	while y < iH do
 		local x = 0;
-		while x <= 2 do
-			local plot = Map.GetPlot(x, y);
-			if plot ~= nil and PlotCanBecomeHills(plot) then
-				table.insert(cands, plot);
+		while x <= 3 do
+			local i = y * iW + x + 1;
+			if plotTypes[i] == PlotTypes.PLOT_LAND and tectonic[i] == PlotTypes.PLOT_HILLS then
+				plotTypes[i] = PlotTypes.PLOT_HILLS;
+				local mi = (iH - y - 1) * iW + (iW - x - 1) + 1;
+				if plotTypes[mi] == PlotTypes.PLOT_LAND then
+					plotTypes[mi] = PlotTypes.PLOT_HILLS;
+				end
 			end
 			x = x + 1;
 		end
 		y = y + 1;
 	end
-	if #cands < 1 then
-		return
-	end
-	if #cands > 1 then
-		cands = GetShuffledCopyOfTable(cands);
-	end
-	local want = 4 + Map.Rand(3, "Standard west edge hills count");
-	local n = 0;
-	local i = 1;
-	while i <= #cands and n < want do
-		if TryConvertPlotToHills(cands[i]) then
-			n = n + 1;
-		end
-		i = i + 1;
-	end
-	print("Standard west edge hills painted:", n, "/", want);
 end
 ------------------------------------------------------------------------------
 function PurgeNearStartLakeFish()
@@ -6115,9 +6068,38 @@ function MultilayeredFractal:GeneratePlotsByRegion()
 	-- since iTerrainFlags is also read by the land/water layers.
 	local savedWrapX = self.iTerrainFlags.FRAC_WRAP_X;
 	self.iTerrainFlags.FRAC_WRAP_X = true;
+	-- ApplyTectonics skips ocean, so the ocean rim painted above would get no
+	-- hills at all. Turn the west rim back into land just for this call, keep
+	-- what the tectonics pass made of x=0..3 (see RestoreBackTectonicHills),
+	-- then put the rim back so the rest of the pipeline sees what it always did.
+	local backTectonic = nil;
+	local backRimMask = {};
+	if (not IsSnowWrapX()) and IsOasisClimate() == false then
+		backTectonic = {};
+		for y = 0, iH - 1 do
+			for x = 0, 3 do
+				local i = y * iW + x + 1;
+				if self.wholeworldPlotTypes[i] == PlotTypes.PLOT_OCEAN then
+					backRimMask[i] = true;
+					self.wholeworldPlotTypes[i] = PlotTypes.PLOT_LAND;
+				end
+			end
+		end
+	end
 	self:ApplyTectonics(args)
+	if backTectonic ~= nil then
+		for y = 0, iH - 1 do
+			for x = 0, 3 do
+				local i = y * iW + x + 1;
+				backTectonic[i] = self.wholeworldPlotTypes[i];
+				if backRimMask[i] then
+					self.wholeworldPlotTypes[i] = PlotTypes.PLOT_OCEAN;
+				end
+			end
+		end
+	end
 	self.iTerrainFlags.FRAC_WRAP_X = savedWrapX;
-	
+
 	if false then -- Skirmish
 		for x = iW / 2 - 2, iW / 2 + 1 do
 			for y = 1, iH - 2 do
@@ -6439,6 +6421,9 @@ function MultilayeredFractal:GeneratePlotsByRegion()
 	end
 	PlaceStandardEdgeSeas(self.wholeworldPlotTypes, iW, iH);
 	ConnectInlandSeasToWest(self.wholeworldPlotTypes, iW, iH);
+	if backTectonic ~= nil then
+		RestoreBackTectonicHills(self.wholeworldPlotTypes, backTectonic, iW, iH);
+	end
 	-- Plot Type generation completed. Return global plot array.
 	return self.wholeworldPlotTypes
 end
@@ -17592,7 +17577,6 @@ function StartPlotSystem()
 	WeeveeDbgCall("AuditFrontMountainGaps", AuditFrontMountainGaps);
 	WeeveeDbgCall("MaybePlaceFujiHorses", function() MaybePlaceFujiHorses(start_plot_database) end);
 	WeeveeDbgCall("EnsureStartHillsFloor", EnsureStartHillsFloor);
-	WeeveeDbgCall("AddStandardWestEdgeHills", AddStandardWestEdgeHills);
 	WeeveeDbg("PlaceResources");
 	WeeveeDbgCall("AddWastelandWaterLayout", AddWastelandWaterLayout);
 	WeeveeDbgCall("FixWastelandFloodPlains", FixWastelandFloodPlains);
