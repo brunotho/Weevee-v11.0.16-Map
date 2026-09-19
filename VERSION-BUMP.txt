@@ -9,8 +9,8 @@ repo from here with `gh repo rename` (old URL redirects). The user must
 rename the local Steam folder in Explorer afterward — do not move the
 Cursor workspace folder from under the editor.
 
-Current version: 11.0.14
-Next version:    11.0.15  (set this as current after a successful bump)
+Current version: 11.0.15
+Next version:    11.0.16  (set this as current after a successful bump)
 
 Names for version X.Y.Z
 -----------------------
