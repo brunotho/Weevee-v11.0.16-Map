@@ -469,8 +469,11 @@ function ResolveSaltWaterPlan()
 			-- compact corner blob instead of a long thin stretch the full
 			-- height of the back coast -- room for one proper peak-island
 			-- plus a handful of splinters, not a scatter of tiny islets
-			-- stretched the whole way up the map.
-			saltCutPct = 60 + Map.Rand(16, "Peaks BackCoast Cut");
+			-- stretched the whole way up the map. 35-50% (rather than the
+			-- original 60-75%) roughly triples the blob's surface area
+			-- together with the widened column depth below, while still
+			-- varying per roll instead of pinning one fixed size/shape.
+			saltCutPct = 35 + Map.Rand(16, "Peaks BackCoast Cut");
 			saltNSeas = 0;
 		elseif Map.Rand(2, "Explo back coast plan") == 0 then
 			saltCutPct = 50;
@@ -4118,15 +4121,19 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 	local nIslands = 3 + Map.Rand(3, "NoWrap Back Islands");
 	local frostyCfg = GetBarrierConfig();
 	local isFrosty = frostyCfg ~= nil and frostyCfg.kind == "frosty";
-	-- Peaky claims a wider (more horizontal), mostly full-height back coast
-	-- instead of the default 3-column strip -- see ResolveSaltWaterPlan's
-	-- own peaks branch for the matching cutPct reduction. Actual islands are
-	-- no longer placed here at all: they're carved by AddPeaksBackCoastIslands
-	-- once terrain has settled, since AddPeaksLayout's own land-flatten pass
-	-- (which runs after this, during GenerateTerrain) would otherwise wipe
-	-- anything placed at the plotTypes-array stage right back to flat land.
+	-- Peaky claims a much deeper (more horizontal) back coast than the
+	-- default 3-column strip -- combined with ResolveSaltWaterPlan's own
+	-- peaks branch (cutPct, and anchoring the kept vertical window to a
+	-- corner), the two together roughly triple the blob's surface area
+	-- versus the original narrower/shallower version, while keeping both
+	-- dimensions randomized per roll rather than pinning one fixed
+	-- size/shape. Actual islands are no longer placed here at all: they're
+	-- carved by AddPeaksBackCoastIslands once terrain has settled, since
+	-- AddPeaksLayout's own land-flatten pass (which runs after this, during
+	-- GenerateTerrain) would otherwise wipe anything placed at the
+	-- plotTypes-array stage right back to flat land.
 	local isPeaks = frostyCfg ~= nil and frostyCfg.kind == "peaks";
-	local backMax = isPeaks and 4 or 2;
+	local backMax = isPeaks and 8 or 2;
 	if UsesExploCoastShape() then
 		minD = 1;
 		maxD = 2;
@@ -4137,9 +4144,9 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 			maxD = 3;
 			depth = 2;
 		elseif isPeaks then
-			minD = 2;
-			maxD = 4;
-			depth = 3;
+			minD = 3;
+			maxD = 7;
+			depth = 5;
 			nIslands = 0;
 		end
 	end
@@ -15638,7 +15645,9 @@ function AddPeaksBackCoastIslands()
 	end
 	local iW, iH = Map.GetGridSize();
 	local mirrored = (DEF_MIRRORED == 1);
-	local bandMax = 4;
+	-- Must match ShapeNoWrapBackstrip's own peaks backMax so islands can use
+	-- the full carved depth of the coast.
+	local bandMax = 8;
 	local function touchesMainland(plot)
 		local d = 0;
 		while d < DirectionTypes.NUM_DIRECTION_TYPES do
