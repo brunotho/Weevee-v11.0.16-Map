@@ -9719,6 +9719,54 @@ function StripLuxuryOnTinyPeaksIslands()
 	WeeveeDbg("Tiny-island luxuries stripped: " .. nStripped);
 end
 ------------------------------------------------------------------------------
+-- No luxury should sit somewhere bordering fewer than 2 tiles that are
+-- both non-Snow and non-water -- the goal is to exclude the harshest
+-- (worst in gameplay terms) spots from eligibility. Judged from the final
+-- committed terrain, not from any particular placement pass, so it
+-- catches a luxury regardless of which one put it there. Deletes rather
+-- than relocates, same reasoning as StripLuxuryOnTinyPeaksIslands: every
+-- quota pass is already done by this point in the pipeline, so a
+-- shortfall here should just stay a shortfall.
+function StripFrostyHarshLuxuries()
+	local cfg = GetBarrierConfig();
+	if cfg == nil or cfg.kind ~= "frosty" then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local maxX = iW - 1;
+	if DEF_MIRRORED == 1 then
+		maxX = math.floor(iW / 2) - 1;
+	end
+	local function isDecent(plot)
+		return plot ~= nil and plot:IsWater() == false and plot:GetTerrainType() ~= TerrainTypes.TERRAIN_SNOW;
+	end
+	local nStripped = 0;
+	local y = 0;
+	while y < iH do
+		local x = 0;
+		while x <= maxX do
+			local plot = Map.GetPlot(x, y);
+			if plot ~= nil and IsWeeveeLuxuryID(plot:GetResourceType(-1)) then
+				local nDecent = 0;
+				local d = 0;
+				while d < DirectionTypes.NUM_DIRECTION_TYPES do
+					if isDecent(PlotDirNoXWrap(x, y, d)) then
+						nDecent = nDecent + 1;
+					end
+					d = d + 1;
+				end
+				if nDecent < 2 then
+					plot:SetResourceType(-1);
+					nStripped = nStripped + 1;
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	WeeveeDbg("Frosty harsh-terrain luxuries stripped: " .. nStripped);
+end
+------------------------------------------------------------------------------
 function AddWetlandRiverDesert()
 	do return end
 	local pct = cfg.riverDesertPct;
@@ -19072,6 +19120,7 @@ function StartPlotSystem()
 	WeeveeDbgCall("EnsureFurOnTundraHasForest", EnsureFurOnTundraHasForest);
 	WeeveeDbgCall("OasisJadeFlatDesertToHill", OasisJadeFlatDesertToHill);
 	WeeveeDbgCall("StripLuxuryOnTinyPeaksIslands", StripLuxuryOnTinyPeaksIslands);
+	WeeveeDbgCall("StripFrostyHarshLuxuries", StripFrostyHarshLuxuries);
 	WeeveeDbgCall("LogRegionalLuxuryCounts-preMirror", function() LogRegionalLuxuryCounts(start_plot_database, "pre-mirror-final") end);
 	WeeveeDbg("before mirror");
 	if DEF_MIRRORED == 1 then
