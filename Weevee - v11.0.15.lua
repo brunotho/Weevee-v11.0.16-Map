@@ -91,8 +91,12 @@ end
 WeeveeDbg("script loaded 11.0.15");
 
 local OPT_CENTER_SPLIT = 1;
-local OPT_SNOW_BARRIER = 2;
-local OPT_WRAP = 3;
+-- Frozen value of the former "Barrier Width" custom option (was the
+-- default, index 3 = width 4) now that the option itself has been removed.
+local BARRIER_WIDTH_FROZEN_OPS = 3;
+-- Frozen value of the former "World Wrap" custom option (was the default,
+-- "No") now that the option itself has been removed.
+local WORLD_WRAP_FROZEN_OPS = 1;
 -- Frozen value of the former "Front Mountain %" custom option (was the
 -- default, 25%) now that the option itself has been removed.
 local FRONT_MOUNTAIN_DENSITY = 0.25;
@@ -199,28 +203,6 @@ function GetMapScriptInfo()
 				DefaultValue = 1,
 				SortPriority = -99,
 			},
-			{
-				Name = "[COLOR_HIGHLIGHT_TEXT]Barrier Width[ENDCOLOR]",
-				Values = {
-					"[COLOR_HIGHLIGHT_TEXT]0[ENDCOLOR]",
-					"[COLOR_HIGHLIGHT_TEXT]2[ENDCOLOR]",
-					"[COLOR_HIGHLIGHT_TEXT][ICON_CAPITAL] 4[ENDCOLOR]",
-					"[COLOR_HIGHLIGHT_TEXT]6[ENDCOLOR]",
-					"[COLOR_HIGHLIGHT_TEXT]Random (2-6)[ENDCOLOR]",
-				},
-				DefaultValue = 3,
-				SortPriority = -98,
-			},
-			{
-				Name = "[COLOR_HIGHLIGHT_TEXT]World Wrap[ENDCOLOR]",
-				Values = {
-					"[COLOR_HIGHLIGHT_TEXT][ICON_CAPITAL] No[ENDCOLOR]",
-					"[COLOR_HIGHLIGHT_TEXT]Yes[ENDCOLOR]",
-					"[COLOR_HIGHLIGHT_TEXT]Random[ENDCOLOR]",
-				},
-				DefaultValue = 1,
-				SortPriority = -97,
-			},
 		},
 	}
 end
@@ -267,7 +249,7 @@ function ResolveWrap()
 		print("Barrier wrap: ignored (legacy snow)");
 		return barrierWrap;
 	end
-	local ops = Map.GetCustomOption(OPT_WRAP);
+	local ops = WORLD_WRAP_FROZEN_OPS;
 	if ops == WRAP_RANDOM then
 		barrierWrap = (Map.Rand(2, "Barrier Wrap Random") == 1);
 		print("Barrier wrap random:", barrierWrap);
@@ -2814,7 +2796,7 @@ function ResolveSnowWrapWidths()
 		return snowWrapBackWidth, snowWrapCenterWidth;
 	end
 	snowWrapWidthResolved = true;
-	local ops = Map.GetCustomOption(OPT_SNOW_BARRIER);
+	local ops = BARRIER_WIDTH_FROZEN_OPS;
 	if IsSnowWrapX() == false then
 		snowWrapBackWidth = 0;
 		if ops == 5 then
