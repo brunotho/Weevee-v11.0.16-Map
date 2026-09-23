@@ -343,9 +343,14 @@ function GetBarrierConfig()
 			mountainPct = 2,
 			hillPct = 19,
 			iceLakePermille = 0,
-			forestPct = 0,
+			-- A boreal barrier transition band reasonably carries some
+			-- sparse conifer forest, unlike Tongue/Bramble's bare tundra.
+			forestPct = 10,
 			oasisPctOfFlat = 0,
-			chaoticMountains = true,
+			-- Front mountains now use the column-weighted ridge design (see
+			-- the front-mountain dispatch below), not the generic chaotic
+			-- ridge.
+			chaoticMountains = false,
 		};
 	end
 	if ops == SPLIT_TONGUE then
@@ -411,7 +416,9 @@ function BarrierTransitionType(cfg)
 		return TerrainTypes.TERRAIN_DESERT;
 	end
 	if cfg.kind == "frosty" then
-		return TerrainTypes.TERRAIN_DESERT;
+		-- Was Desert, left over from an earlier design -- a rocky Tundra
+		-- transition fits an icy climate's barrier far better.
+		return TerrainTypes.TERRAIN_TUNDRA;
 	end
 	if cfg.kind == "tongue" or cfg.kind == "bramble" then
 		return TerrainTypes.TERRAIN_TUNDRA;
@@ -454,10 +461,7 @@ function ResolveSaltWaterPlan()
 	saltPlanResolved = true;
 	if UsesExploCoastShape() then
 		local cfg = GetBarrierConfig();
-		if cfg ~= nil and cfg.kind == "frosty" then
-			saltCutPct = 30;
-			saltNSeas = 1 + Map.Rand(2, "Frosty Inland Seas");
-		elseif cfg ~= nil and cfg.kind == "peaks" then
+		if cfg ~= nil and cfg.kind == "peaks" then
 			-- Inland seas were never actually carved as a distinct feature
 			-- for this climate -- nothing downstream consumes saltNSeas here,
 			-- it's cutPct alone that decides how much of the back coast's
@@ -477,20 +481,23 @@ function ResolveSaltWaterPlan()
 			-- instead of pinning one fixed size/shape.
 			saltCutPct = 26 + Map.Rand(16, "Peaks BackCoast Cut");
 			saltNSeas = 0;
-		elseif Map.Rand(2, "Explo back coast plan") == 0 then
-			saltCutPct = 50;
-			saltNSeas = 2;
 		else
-			saltCutPct = 25;
-			saltNSeas = 1;
+			-- Frosty no longer gets its own special-cased split here (see the
+			-- climate's from-scratch redesign) -- its back coast is anchored
+			-- to the northwest cold corner by ShapeNoWrapBackstrip's own
+			-- isFrosty branch regardless of which of these two generic
+			-- budgets it rolls, so it just uses the same reusable 50/50
+			-- split every other non-special-cased climate does.
+			if Map.Rand(2, "Explo back coast plan") == 0 then
+				saltCutPct = 50;
+				saltNSeas = 2;
+			else
+				saltCutPct = 25;
+				saltNSeas = 1;
+			end
 		end
 	else
-		local cfg = GetBarrierConfig();
-		if cfg ~= nil and cfg.kind == "frosty" then
-			saltNSeas = 1 + Map.Rand(2, "Frosty Inland Seas");
-		else
-			saltNSeas = Map.Rand(4, "Snow Wrap Lake Count");
-		end
+		saltNSeas = Map.Rand(4, "Snow Wrap Lake Count");
 	end
 	print("Salt plan: cut", saltCutPct, "% back coast, seas", saltNSeas);
 	return saltCutPct, saltNSeas, saltSeaSizeMin, saltSeaSizeRand, saltAllowEdge;
@@ -2915,11 +2922,15 @@ function GetMapInitData(worldSize)
 			end
 		end
 		if cfg ~= nil and cfg.kind == "frosty" then
+			-- +4 width per side (matches Oasis's own extra-width pattern
+			-- above), +2 height -- per the user's canvas spec for the
+			-- redesigned climate.
 			if DEF_MIRRORED == 1 then
 				w = w + 8;
 			else
 				w = w + 4;
 			end
+			h = h + 2;
 		end
 		if cfg ~= nil and cfg.tilted == true then
 			-- The tilted barrier's row-mirroring math needs a map height that's
@@ -2979,7 +2990,6 @@ local luxTargetResolved = false;
 local luxWantU = 15;
 local luxWantD = 7;
 local luxWantT = 3;
-local frostyFrac = nil;
 function ResetWeeveeGenState()
 	barrierSplitResolved = false;
 	barrierWrapResolved = false;
@@ -2990,7 +3000,6 @@ function ResetWeeveeGenState()
 	oasisJungleCached = false;
 	oasisJungleExists = false;
 	murkTundraLakeTiles = {};
-	frostyFrac = nil;
 	luxTargetResolved = false;
 	weeveeStartDistFail = false;
 end
@@ -3041,7 +3050,6 @@ function ResetWeeveeMapAttempt()
 	brambleShapeReady = false;
 	brambleLo = {};
 	brambleHi = {};
-	frostyFrac = nil;
 	luxTargetResolved = false;
 	weeveeStartDistFail = false;
 end
@@ -3064,7 +3072,37 @@ end
 function GetClimateLatitudeAtPlot(iX, iY)
 	local scale, variation = ResolveClimateScale();
 	local iW, iH = Map.GetGridSize();
-	local lat = math.abs((iH / 2) - iY) / (iH / 2);
+	local lat;
+	local cfg = GetBarrierConfig();
+	if cfg ~= nil and cfg.kind == "frosty" then
+		-- Frosty's whole identity is a single cold impulse radiating outward
+		-- from the map's northwest corner (the same corner its back coast is
+		-- anchored to -- see ShapeNoWrapBackstrip's own isFrosty branch),
+		-- rather than the usual vertical-band model every other climate
+		-- uses. Routing that through this one function means vanilla's own
+		-- TerrainGenerator and FeatureGenerator (both already wired through
+		-- it, via TerrainGenerator:GetLatitudeAtPlot and
+		-- FeatureGenerator:GetLatitudeAtPlot below) do all the actual
+		-- snow/tundra/plains/grass/forest/jungle banding work -- with
+		-- realistic transitions -- for free, off a differently-shaped input
+		-- instead of a from-scratch imperative painter.
+		--
+		-- Normalized against the distance from that corner to the far
+		-- corner of one civ's own west half (mid, 0), not the whole map's
+		-- diagonal, so the full 0..1 range is actually reached within the
+		-- playable area instead of the climate reading uniformly cold. 0 at
+		-- the corner itself would be backwards (that's the COLDEST point),
+		-- so this is inverted from a plain distance ratio: near 1 at the
+		-- corner, falling to 0 at the far corner.
+		local mid = iW / 2;
+		local maxDist = Map.PlotDistance(0, iH - 1, mid, 0);
+		if maxDist < 1 then
+			maxDist = 1;
+		end
+		lat = 1 - (Map.PlotDistance(0, iH - 1, iX, iY) / maxDist);
+	else
+		lat = math.abs((iH / 2) - iY) / (iH / 2);
+	end
 	lat = lat + (128 - variation:GetHeight(iX, iY)) / (255.0 * 5.0);
 	lat = scale * (math.clamp(lat, 0, 1));
 	return lat;
@@ -6367,16 +6405,25 @@ function MultilayeredFractal:GeneratePlotsByRegion()
 					PlaceFrontMountainField(self.wholeworldPlotTypes, iW, iH, x_wrap_west - 2, x_wrap_west - 1, x_wrap_west, x_wrap_west + 1, x_wrap_west + 2, FRONT_MOUNTAIN_BUDGET, FRONT_MOUNTAIN_CLUMP_CAP);
 				end
 			end
+		elseif cfg.kind == "frosty" then
+			-- Same column-weighted ridge design as Standard/Wetland/Oasis,
+			-- not the older generic chaotic ridge -- part of the climate's
+			-- from-scratch redesign.
+			local col1, col2, col3, col4, col5 = GetFrontMountainColumns5West(iW);
+			PurgeFrontMountainColumns(self.wholeworldPlotTypes, iW, iH, col1, col2, col3);
+			if not DISABLE_FRONT_MOUNTAIN_RIDGES then
+				PlaceFrontMountainField(self.wholeworldPlotTypes, iW, iH, col1, col2, col3, col4, col5, FRONT_MOUNTAIN_BUDGET, FRONT_MOUNTAIN_CLUMP_CAP);
+			end
+			if IsSnowWrapX() then
+				local x_wrap_west = GetSnowWrapLandMountainXs(iW);
+				PurgeFrontMountainColumns(self.wholeworldPlotTypes, iW, iH, x_wrap_west - 1, x_wrap_west, x_wrap_west + 1);
+				if not DISABLE_FRONT_MOUNTAIN_RIDGES then
+					PlaceFrontMountainField(self.wholeworldPlotTypes, iW, iH, x_wrap_west - 2, x_wrap_west - 1, x_wrap_west, x_wrap_west + 1, x_wrap_west + 2, FRONT_MOUNTAIN_BUDGET, FRONT_MOUNTAIN_CLUMP_CAP);
+				end
+			end
 		elseif cfg.chaoticMountains then
 			if cfg.kind ~= "tongue" and cfg.kind ~= "bramble" then
-				local dens = mountainDensity;
-				if cfg.kind == "frosty" then
-					dens = dens * 1.28;
-					if dens > 0.55 then
-						dens = 0.55;
-					end
-				end
-				PlaceChaoticFrontRidge(self.wholeworldPlotTypes, iW, iH, iW / 2 - 4, dens);
+				PlaceChaoticFrontRidge(self.wholeworldPlotTypes, iW, iH, iW / 2 - 4, mountainDensity);
 			end
 			if IsSnowWrapX() then
 				local x_wrap_west = GetSnowWrapLandMountainXs(iW);
@@ -6868,11 +6915,18 @@ function GenerateTerrain()
 		args.fDesertBottomLatitude = 1.1;
 		args.fDesertTopLatitude = 1.1;
 	elseif cfg ~= nil and cfg.kind == "frosty" then
-		args.fSnowLatitude = 1.1;
-		args.fTundraLatitude = 1.1;
+		-- Real (not disabled/1.1) thresholds, unlike every other climate
+		-- here -- GetClimateLatitudeAtPlot feeds this generator a corner-
+		-- radiating value for Frosty instead of the usual vertical band, so
+		-- vanilla's own snow/tundra/plains/grass banding does the real
+		-- work: Snow right at the cold corner, Tundra further out, Plains
+		-- in the middle band, Grass once far enough from the corner. No
+		-- Desert -- not a fit for this climate.
+		args.fSnowLatitude = 0.72;
+		args.fTundraLatitude = 0.48;
 		args.iDesertPercent = 0;
-		args.iPlainsPercent = 40;
-		args.fGrassLatitude = 0.38;
+		args.iPlainsPercent = 45;
+		args.fGrassLatitude = 0.22;
 		args.fDesertBottomLatitude = 1.1;
 		args.fDesertTopLatitude = 1.1;
 	elseif cfg ~= nil and (cfg.kind == "tongue" or cfg.kind == "bramble") then
@@ -6892,7 +6946,6 @@ function GenerateTerrain()
 	WeeveeDbg("SetTerrainTypes done");
 	AddMireBands();
 	AddPeaksLayout();
-	AddFrostyLayout();
 	AddBrambleLayout();
 	WeeveeDbg("GenerateTerrain done");
 end
@@ -6911,7 +6964,12 @@ end
 ------------------------------------------------------------------------------
 function FeatureGenerator:AddJunglesAtPlot(plot, iX, iY, lat)
 	local cfg = GetBarrierConfig();
-	if cfg ~= nil and (cfg.kind == "wetland" or cfg.kind == "peaks" or cfg.kind == "frosty" or cfg.kind == "tongue" or cfg.kind == "bramble") then
+	-- Frosty deliberately left OUT of this exemption list, unlike its
+	-- siblings here -- its redesign wants vanilla's own generic jungle
+	-- placement (iJunglePercent/iJungleFactor, set in AddFeatures) to
+	-- produce its small warm-corner jungle accent, rather than a bespoke
+	-- placement pass.
+	if cfg ~= nil and (cfg.kind == "wetland" or cfg.kind == "peaks" or cfg.kind == "tongue" or cfg.kind == "bramble") then
 		return
 	end
 	local jungle_height = self.jungles:GetHeight(iX, iY);
@@ -6924,7 +6982,10 @@ end
 ------------------------------------------------------------------------------
 function FeatureGenerator:AddMarshAtPlot(plot, iX, iY, lat)
 	local cfg = GetBarrierConfig();
-	if cfg ~= nil and (cfg.kind == "wetland" or cfg.kind == "peaks" or cfg.kind == "frosty" or cfg.kind == "tongue" or cfg.kind == "bramble") then
+	-- Frosty left out here too (fMarshPercent is 0 for it anyway, so this
+	-- is moot either way, but consistent with letting vanilla's generic
+	-- placement own this climate now).
+	if cfg ~= nil and (cfg.kind == "wetland" or cfg.kind == "peaks" or cfg.kind == "tongue" or cfg.kind == "bramble") then
 		return
 	end
 	local marsh_height = self.marsh:GetHeight(iX, iY)
@@ -6947,9 +7008,11 @@ function FeatureGenerator:AddForestsAtPlot(plot, iX, iY, lat)
 			return
 		end
 	end
-	if cfg ~= nil and cfg.kind == "frosty" then
-		return
-	end
+	-- Frosty deliberately NOT exempted here (unlike its old self, and unlike
+	-- its siblings below) -- vanilla's own generic forest placement
+	-- (iForestPercent, set in AddFeatures) now owns this climate's forest
+	-- cover, latitude-gated by GetClimateLatitudeAtPlot's corner-distance
+	-- branch, instead of a bespoke placement pass.
 	if cfg ~= nil and (cfg.kind == "tongue" or cfg.kind == "bramble") then
 		return
 	end
@@ -7025,7 +7088,15 @@ end
 function FeatureGenerator:AdjustTerrainTypes()
 	local cfg = GetBarrierConfig();
 	local softenArctic = true;
-	if cfg ~= nil and (cfg.kind == "wasteland" or cfg.kind == "wetland" or cfg.kind == "peaks" or cfg.kind == "frosty" or cfg.kind == "tongue" or cfg.kind == "bramble") then
+	-- Frosty deliberately removed from this exemption list: it used to call
+	-- into a "FrostyPlotAdjTerrain" that was never actually defined
+	-- anywhere in this file -- a leftover WIP gap that would throw a Lua
+	-- error ("attempt to call a nil value") the moment a river ran through
+	-- Tundra anywhere on a Frosty map. Falling through to the same generic
+	-- river-softening every other non-exempted climate gets both fixes that
+	-- crash and is simpler, consistent with the redesign's "reuse global
+	-- mechanisms" approach.
+	if cfg ~= nil and (cfg.kind == "wasteland" or cfg.kind == "wetland" or cfg.kind == "peaks" or cfg.kind == "tongue" or cfg.kind == "bramble") then
 		softenArctic = false;
 	end
 	local width = self.iGridW - 1;
@@ -7037,10 +7108,6 @@ function FeatureGenerator:AdjustTerrainTypes()
 			local plot = Map.GetPlot(x, y);
 			if plot:GetFeatureType() == self.featureJungle then
 				plot:SetTerrainType(self.terrainPlains, false, true)
-			elseif cfg ~= nil and cfg.kind == "frosty" and plot:IsRiver() then
-				if plot:GetTerrainType() == self.terrainTundra and FrostyPlotAdjTerrain(plot, TerrainTypes.TERRAIN_SNOW) == false then
-					plot:SetTerrainType(self.terrainPlains, false, true)
-				end
 			elseif softenArctic and plot:IsRiver() then
 				local terrainType = plot:GetTerrainType();
 				if terrainType == self.terrainTundra then
@@ -9751,9 +9818,16 @@ function AddFeatures()
 		args.fMarshPercent = 0;
 		args.iOasisPercent = 0;
 	elseif cfg ~= nil and cfg.kind == "frosty" then
-		args.iJunglePercent = 0;
-		args.iJungleFactor = 5;
-		args.iForestPercent = 28;
+		-- A modest patch of jungle right at the far (warmest) corner from
+		-- the cold impulse -- the same "1/iJungleFactor of lat" gate other
+		-- climates use to widen/narrow their jungle band works identically
+		-- here, it's just gating on distance-from-corner instead of
+		-- distance-from-equator (see GetClimateLatitudeAtPlot's frosty
+		-- branch). A small deliberate realistic-transition flourish per the
+		-- user's request, not a defining feature of the climate.
+		args.iJunglePercent = 25;
+		args.iJungleFactor = 4;
+		args.iForestPercent = 40;
 		args.fMarshPercent = 0;
 		args.iOasisPercent = 0;
 	elseif cfg ~= nil and (cfg.kind == "tongue" or cfg.kind == "bramble") then
@@ -9796,9 +9870,7 @@ function AddFeatures()
 	AddPeaksBackCoastForest();
 	AddPeaksEconHillFill();
 	AddPeaksRandomForestSpray();
-	AddFrostyForests();
-	AddFrostySouthJungle();
-	AddFrostyIce();
+	AddFrostyCornerIce();
 	AddBrambleFeatures();
 	ForestMountainsToBareTarget();
 	WeeveeLogFlatHillSample();
@@ -11879,379 +11951,6 @@ function ConnectInlandSeasToWest(plotTypes, iW, iH)
 	end
 end
 ------------------------------------------------------------------------------
-function AddFrostyLayout()
-	local cfg = GetBarrierConfig();
-	if cfg == nil or cfg.kind ~= "frosty" then
-		return
-	end
-	WeeveeDbg("AddFrostyLayout");
-	local iW, iH = Map.GetGridSize();
-	local skip = FillMireSkip(iW);
-	local mirrored = (DEF_MIRRORED == 1);
-	FrostyEnsureFrac(iW, iH);
-	local nSnow = 0;
-	local nTun = 0;
-	local nPlains = 0;
-	local nGrass = 0;
-	local y = 0;
-	while y < iH do
-		local x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
-				local plot = Map.GetPlot(x, y);
-				if plot ~= nil and plot:IsWater() == false then
-					local w = FrostyWarmth(x, y, iW, iH);
-					local terr = TerrainTypes.TERRAIN_GRASS;
-					if w < 0.22 then
-						terr = TerrainTypes.TERRAIN_SNOW;
-					elseif w < 0.36 then
-						if Map.Rand(100, "Frosty Snow Tundra Mix") < 62 then
-							terr = TerrainTypes.TERRAIN_SNOW;
-						else
-							terr = TerrainTypes.TERRAIN_TUNDRA;
-						end
-					elseif w < 0.50 then
-						terr = TerrainTypes.TERRAIN_TUNDRA;
-					elseif w < 0.62 then
-						if Map.Rand(100, "Frosty Tundra Plains Mix") < 70 then
-							terr = TerrainTypes.TERRAIN_TUNDRA;
-						else
-							terr = TerrainTypes.TERRAIN_PLAINS;
-						end
-					elseif w < 0.84 then
-						terr = TerrainTypes.TERRAIN_PLAINS;
-					else
-						terr = TerrainTypes.TERRAIN_GRASS;
-					end
-					plot:SetTerrainType(terr, false, false);
-					if terr == TerrainTypes.TERRAIN_SNOW then
-						nSnow = nSnow + 1;
-					elseif terr == TerrainTypes.TERRAIN_TUNDRA then
-						nTun = nTun + 1;
-					elseif terr == TerrainTypes.TERRAIN_PLAINS then
-						nPlains = nPlains + 1;
-					else
-						nGrass = nGrass + 1;
-					end
-				end
-			end
-			x = x + 1;
-		end
-		y = y + 1;
-	end
-	FrostyAccentNorthCap(iW, iH, skip, mirrored);
-	FrostyAccentNunataks(iW, iH, skip, mirrored);
-	FrostyAccentGlacierTongue(iW, iH, skip, mirrored);
-	SlashMireMountainBlobs(iW, iH, skip);
-	FrostyShiftMountains(iW, iH, skip, mirrored);
-	FrostyEnsureFrontMountains(iW, iH, skip, mirrored);
-	print("Frosty terrain snow", nSnow, "tundra", nTun, "plains", nPlains, "grass", nGrass);
-	WeeveeDbg("AddFrostyLayout done");
-end
-------------------------------------------------------------------------------
-function FrostyEnsureFrac(iW, iH)
-	if frostyFrac ~= nil then
-		return
-	end
-	if iW == nil then
-		iW, iH = Map.GetGridSize();
-	end
-	frostyFrac = Fractal.Create(iW, iH, 4, Map.GetFractalFlags(), -1, -1);
-end
-------------------------------------------------------------------------------
-function FrostyWarmth(x, y, iW, iH)
-	FrostyEnsureFrac(iW, iH);
-	local poleX = 0;
-	local poleY = iH - 1;
-	local frontX = math.floor(iW / 2) - 4;
-	if frontX < 4 then
-		frontX = iW - 1;
-	end
-	local maxD = Map.PlotDistance(poleX, poleY, frontX, 0);
-	if maxD < 1 then
-		maxD = 1;
-	end
-	local radial = Map.PlotDistance(x, y, poleX, poleY) / maxD;
-	local south = 0;
-	if iH > 1 then
-		south = (iH - 1 - y) / (iH - 1);
-	end
-	local noise = 0;
-	local hLo = frostyFrac:GetHeight(12);
-	local hHi = frostyFrac:GetHeight(88);
-	if hHi > hLo then
-		noise = ((frostyFrac:GetHeight(x, y) - hLo) / (hHi - hLo) - 0.5) * 0.16;
-	end
-	local n = radial * 0.82 + south * 0.18 + noise;
-	local yNorm = 0;
-	if iH > 1 then
-		yNorm = y / (iH - 1);
-	end
-	if yNorm > 0.90 then
-		n = n - 0.14;
-	elseif yNorm > 0.84 then
-		n = n - 0.07;
-	end
-	if n < 0 then
-		n = 0;
-	end
-	n = n + 0.05;
-	if n > 1 then
-		n = 1;
-	end
-	return n
-end
-------------------------------------------------------------------------------
-function FrostyAccentNorthCap(iW, iH, skip, mirrored)
-	local yMin = math.floor((iH - 1) * 0.92);
-	local y = yMin;
-	while y < iH do
-		local x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
-				local plot = Map.GetPlot(x, y);
-				if plot ~= nil and plot:IsWater() == false then
-					local w = FrostyWarmth(x, y, iW, iH);
-					if w < 0.46 then
-						plot:SetTerrainType(TerrainTypes.TERRAIN_SNOW, false, false);
-					end
-				end
-			end
-			x = x + 1;
-		end
-		y = y + 1;
-	end
-end
-------------------------------------------------------------------------------
-function FrostyAccentNunataks(iW, iH, skip, mirrored)
-	local n = 0;
-	local y = 0;
-	while y < iH do
-		local x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
-				local plot = Map.GetPlot(x, y);
-				if plot ~= nil
-					and plot:IsWater() == false
-					and plot:GetPlotType() == PlotTypes.PLOT_LAND then
-					local t = plot:GetTerrainType();
-					local chance = 0;
-					if t == TerrainTypes.TERRAIN_SNOW then
-						chance = 14;
-					elseif t == TerrainTypes.TERRAIN_TUNDRA then
-						chance = 8;
-					end
-					if chance > 0 and Map.Rand(100, "Frosty Nunatak") < chance then
-						plot:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
-						n = n + 1;
-					end
-				end
-			end
-			x = x + 1;
-		end
-		y = y + 1;
-	end
-	print("Frosty nunatak hills:", n);
-end
-------------------------------------------------------------------------------
-function FrostyAccentGlacierTongue(iW, iH, skip, mirrored)
-	local cands = {};
-	local y = math.floor((iH - 1) * 0.70);
-	while y < iH do
-		local x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
-				local plot = Map.GetPlot(x, y);
-				if plot ~= nil
-					and plot:IsWater() == false
-					and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
-					and plot:GetTerrainType() == TerrainTypes.TERRAIN_SNOW
-					and FrostyWarmth(x, y, iW, iH) < 0.28 then
-					table.insert(cands, plot);
-				end
-			end
-			x = x + 1;
-		end
-		y = y + 1;
-	end
-	if #cands < 4 then
-		return
-	end
-	cands = GetShuffledCopyOfTable(cands);
-	local seed = cands[1];
-	local q = {seed};
-	seed:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
-	seed:SetTerrainType(TerrainTypes.TERRAIN_SNOW, false, false);
-	local grown = 1;
-	local target = 7 + Map.Rand(6, "Frosty Glacier Size");
-	local qi = 1;
-	while qi <= #q and grown < target do
-		local p = q[qi];
-		qi = qi + 1;
-		local d = 0;
-		while d < DirectionTypes.NUM_DIRECTION_TYPES do
-			local adj = PlotDirNoXWrap(p:GetX(), p:GetY(), d);
-			if adj ~= nil and grown < target then
-				local ax = adj:GetX();
-				local ay = adj:GetY();
-				if skip[ax] ~= true and MirrorOwnsPlot(ax, ay, mirrored, iW)
-					and adj:IsWater() == false
-					and adj:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
-					if Map.Rand(100, "Frosty Glacier Grow") < 58 then
-						adj:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
-						adj:SetTerrainType(TerrainTypes.TERRAIN_SNOW, false, false);
-						table.insert(q, adj);
-						grown = grown + 1;
-					end
-				end
-			end
-			d = d + 1;
-		end
-	end
-	print("Frosty glacier tongue:", grown);
-end
-------------------------------------------------------------------------------
-function FrostyShiftMountains(iW, iH, skip, mirrored)
-	local xCenter = math.floor(iW / 2) - 4;
-	local frontLo = xCenter - 2;
-	local frontHi = xCenter + 2;
-	local southY = math.floor(iH * 0.5);
-	local function isFrontX(x)
-		if skip[x] == true then
-			return true
-		end
-		if x >= frontLo and x <= frontHi then
-			return true
-		end
-		return false
-	end
-	local function adjMtn(x, y)
-		local n = 0;
-		local d = 0;
-		while d < DirectionTypes.NUM_DIRECTION_TYPES do
-			local adj = PlotDirNoXWrap(x, y, d);
-			if adj ~= nil and adj:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
-				n = n + 1;
-			end
-			d = d + 1;
-		end
-		return n
-	end
-	local nCut = 0;
-	local y = 0;
-	while y < southY do
-		local x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) and isFrontX(x) == false then
-				local plot = Map.GetPlot(x, y);
-				if plot ~= nil and plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
-					if Map.Rand(100, "Frosty South Mtn Cut") < 62 then
-						plot:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
-						nCut = nCut + 1;
-					end
-				end
-			end
-			x = x + 1;
-		end
-		y = y + 1;
-	end
-	local nAdd = 0;
-	y = 0;
-	while y < iH do
-		local x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) and isFrontX(x) == false then
-				local plot = Map.GetPlot(x, y);
-				if plot ~= nil
-					and plot:IsWater() == false
-					and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
-					and plot:GetTerrainType() == TerrainTypes.TERRAIN_SNOW then
-					local chance = 6;
-					if plot:GetPlotType() == PlotTypes.PLOT_HILLS then
-						chance = 16;
-					end
-					local nM = adjMtn(x, y);
-					if nM >= 2 then
-						chance = 0;
-					elseif nM == 1 then
-						chance = chance + 10;
-					end
-					if chance > 0 and Map.Rand(100, "Frosty Snow Mtn") < chance then
-						plot:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
-						nAdd = nAdd + 1;
-					end
-				end
-			end
-			x = x + 1;
-		end
-		y = y + 1;
-	end
-	print("Frosty mountains south cut:", nCut, " snow add:", nAdd);
-end
-------------------------------------------------------------------------------
-function FrostyEnsureFrontMountains(iW, iH, skip, mirrored)
-	local wrapN, centerN = ResolveSnowWrapWidths();
-	if centerN < 1 then
-		return
-	end
-	local mid = math.floor(iW / 2);
-	local tundraX = mid - centerN / 2 - 1;
-	local xLo = tundraX - 2;
-	local xHi = tundraX;
-	if xLo < 0 then
-		xLo = 0;
-	end
-	local nAdd = 0;
-	local y0 = 0;
-	while y0 < iH do
-		local y1 = y0 + 5;
-		if y1 >= iH then
-			y1 = iH - 1;
-		end
-		local nMtn = 0;
-		local cands = {};
-		local y = y0;
-		while y <= y1 do
-			local x = xLo;
-			while x <= xHi do
-				if skip[x] ~= true and ((not mirrored) or (x <= iW * 0.5)) then
-					local plot = Map.GetPlot(x, y);
-					if plot ~= nil and plot:IsWater() == false then
-						if plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
-							nMtn = nMtn + 1;
-						else
-							table.insert(cands, plot);
-						end
-					end
-				end
-				x = x + 1;
-			end
-			y = y + 1;
-		end
-		if nMtn < 2 and #cands > 0 then
-			local nWant = 2 - nMtn;
-			local ci = 1;
-			while nWant > 0 and #cands > 0 do
-				local pick = cands[1 + Map.Rand(#cands, "Frosty Front Gap")];
-				pick:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
-				nAdd = nAdd + 1;
-				nWant = nWant - 1;
-				local next = {};
-				ci = 1;
-				while ci <= #cands do
-					if cands[ci] ~= pick then
-						table.insert(next, cands[ci]);
-					end
-					ci = ci + 1;
-				end
-				cands = next;
-			end
-		end
-		y0 = y0 + 3;
-	end
-	print("Frosty front gap mountains:", nAdd);
-end
-------------------------------------------------------------------------------
 function TongueEnsureEconFrac()
 	if tongueEconFrac ~= nil then
 		return
@@ -13139,236 +12838,6 @@ function StripBrambleSeparatorFeatures()
 	end
 end
 ------------------------------------------------------------------------------
-function AddFrostyForests()
-	local cfg = GetBarrierConfig();
-	if cfg == nil or cfg.kind ~= "frosty" then
-		return
-	end
-	local iW, iH = Map.GetGridSize();
-	local skip = FillMireSkip(iW);
-	local mirrored = (DEF_MIRRORED == 1);
-	FrostyEnsureFrac(iW, iH);
-	local snowPlots = {};
-	local tundraPlots = {};
-	local plainsPlots = {};
-	local grassPlots = {};
-	local y = 0;
-	while y < iH do
-		local x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
-				local plot = Map.GetPlot(x, y);
-				if plot ~= nil
-					and plot:IsWater() == false
-					and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
-					and plot:GetFeatureType() == FeatureTypes.NO_FEATURE then
-					local t = plot:GetTerrainType();
-					if t == TerrainTypes.TERRAIN_SNOW then
-						if FrostyWarmth(x, y, iW, iH) > 0.10 then
-							table.insert(snowPlots, plot);
-						end
-					elseif t == TerrainTypes.TERRAIN_TUNDRA then
-						table.insert(tundraPlots, plot);
-					elseif t == TerrainTypes.TERRAIN_PLAINS then
-						if y > 5 or FrostyWarmth(x, y, iW, iH) < 0.80 then
-							table.insert(plainsPlots, plot);
-						end
-					elseif t == TerrainTypes.TERRAIN_GRASS then
-						if y > 5 or FrostyWarmth(x, y, iW, iH) < 0.80 then
-							table.insert(grassPlots, plot);
-						end
-					end
-				end
-			end
-			x = x + 1;
-		end
-		y = y + 1;
-	end
-	PlaceClusteredFeature(snowPlots, FeatureTypes.FEATURE_FOREST, 17, "Frosty Snow Forest");
-	PlaceClusteredFeature(tundraPlots, FeatureTypes.FEATURE_FOREST, 52, "Frosty Tundra Forest");
-	PlaceClusteredFeature(plainsPlots, FeatureTypes.FEATURE_FOREST, 24, "Frosty Plains Forest");
-	PlaceClusteredFeature(grassPlots, FeatureTypes.FEATURE_FOREST, 34, "Frosty Grass Forest");
-end
-------------------------------------------------------------------------------
-function AddFrostyIce()
-	local cfg = GetBarrierConfig();
-	if cfg == nil or cfg.kind ~= "frosty" then
-		return
-	end
-	local iW, iH = Map.GetGridSize();
-	local skip = FillMireSkip(iW);
-	local mirrored = (DEF_MIRRORED == 1);
-	local frontX = math.floor(iW / 2) - 4;
-	if frontX < 1 then
-		frontX = 1;
-	end
-	local n = 0;
-	local y = 0;
-	while y < iH do
-		local fromTop = (iH - 1) - y;
-		if fromTop < 6 then
-			local x = 0;
-			while x < iW do
-				if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
-					local plot = Map.GetPlot(x, y);
-					if plot ~= nil and plot:IsWater() and plot:GetFeatureType() == FeatureTypes.NO_FEATURE then
-						local xN = x / frontX;
-						if xN > 1 then
-							xN = 1;
-						end
-						local rowN = 0;
-						if fromTop > 0 then
-							rowN = fromTop / 5;
-						end
-						if rowN > 1 then
-							rowN = 1;
-						end
-						local chance = math.floor(88 * (1 - rowN * 0.80) * (1 - xN * 0.58));
-						if plot:IsLake() then
-							chance = chance + 10;
-						elseif plot:IsAdjacentToLand() == false then
-							chance = math.floor(chance * 0.50);
-						end
-						if Map.Rand(100, "Frosty Ice Gap") < 22 then
-							chance = math.floor(chance * 0.28);
-						end
-						if chance > 0 and Map.Rand(100, "Frosty Ice") < chance then
-							plot:SetFeatureType(FeatureTypes.FEATURE_ICE, -1);
-							n = n + 1;
-						end
-					end
-				end
-				x = x + 1;
-			end
-		end
-		y = y + 1;
-	end
-	print("Frosty ice:", n);
-end
-------------------------------------------------------------------------------
-function AddFrostySouthJungle()
-	local cfg = GetBarrierConfig();
-	if cfg == nil or cfg.kind ~= "frosty" then
-		return
-	end
-	local iW, iH = Map.GetGridSize();
-	local skip = FillMireSkip(iW);
-	local mirrored = (DEF_MIRRORED == 1);
-	FrostyEnsureFrac(iW, iH);
-	local function jungleOk(plot)
-		if plot == nil or plot:IsWater() or plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
-			return false
-		end
-		local t = plot:GetTerrainType();
-		if t ~= TerrainTypes.TERRAIN_GRASS and t ~= TerrainTypes.TERRAIN_PLAINS then
-			return false
-		end
-		local feat = plot:GetFeatureType();
-		if feat ~= FeatureTypes.NO_FEATURE and feat ~= FeatureTypes.FEATURE_FOREST then
-			return false
-		end
-		return true
-	end
-	local function jungleWarm(x, y)
-		local w = FrostyWarmth(x, y, iW, iH);
-		if w < 0.76 then
-			return 0
-		end
-		local n = math.floor((w - 0.76) / 0.24 * 100);
-		if n > 100 then
-			n = 100;
-		end
-		return n
-	end
-	local function paintJungle(plot)
-		plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-		plot:SetFeatureType(FeatureTypes.FEATURE_JUNGLE, -1);
-	end
-	local n = 0;
-	local x = 0;
-	while x < iW do
-		if skip[x] ~= true and MirrorOwnsPlot(x, 0, mirrored, iW) then
-			local plot = Map.GetPlot(x, 0);
-			local warm = jungleWarm(x, 0);
-			if jungleOk(plot) and warm > 0 then
-				local chance = warm;
-				local d = 0;
-				while d < DirectionTypes.NUM_DIRECTION_TYPES do
-					local adj = PlotDirNoXWrap(x, 0, d);
-					if adj ~= nil and adj:GetY() == 0 and adj:GetFeatureType() == FeatureTypes.FEATURE_JUNGLE then
-						chance = chance + 18;
-					end
-					d = d + 1;
-				end
-				if chance > 96 then
-					chance = 96;
-				end
-				if Map.Rand(100, "Frosty Edge Jungle") < chance then
-					paintJungle(plot);
-					n = n + 1;
-				end
-			end
-		end
-		x = x + 1;
-	end
-	x = 0;
-	while x < iW do
-		if skip[x] ~= true and MirrorOwnsPlot(x, 0, mirrored, iW) then
-			local plot = Map.GetPlot(x, 0);
-			if jungleOk(plot) and jungleWarm(x, 0) >= 50 then
-				local d = 0;
-				local hug = false;
-				while d < DirectionTypes.NUM_DIRECTION_TYPES do
-					local adj = PlotDirNoXWrap(x, 0, d);
-					if adj ~= nil and adj:GetFeatureType() == FeatureTypes.FEATURE_JUNGLE then
-						hug = true;
-					end
-					d = d + 1;
-				end
-				if hug then
-					paintJungle(plot);
-					n = n + 1;
-				end
-			end
-		end
-		x = x + 1;
-	end
-	local y = 1;
-	while y <= 5 and y < iH do
-		x = 0;
-		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
-				local plot = Map.GetPlot(x, y);
-				local warm = jungleWarm(x, y);
-				if jungleOk(plot) and warm >= 22 then
-					local hug = false;
-					local d = 0;
-					while d < DirectionTypes.NUM_DIRECTION_TYPES do
-						local adj = PlotDirNoXWrap(x, y, d);
-						if adj ~= nil and adj:GetFeatureType() == FeatureTypes.FEATURE_JUNGLE then
-							hug = true;
-						end
-						d = d + 1;
-					end
-					if hug then
-						local chance = math.floor((62 - y * 10) * (0.30 + warm / 140));
-						if chance < 8 then
-							chance = 8;
-						end
-						if Map.Rand(100, "Frosty Jungle Grow") < chance then
-							paintJungle(plot);
-							n = n + 1;
-						end
-					end
-				end
-			end
-			x = x + 1;
-		end
-		y = y + 1;
-	end
-	print("Frosty south jungle:", n);
-end
-------------------------------------------------------------------------------
 function CountAdjacentTerrain(plot, terrainType)
 	local n = 0;
 	local d = 0;
@@ -13462,6 +12931,46 @@ function AddNorthIceArms()
 		GrowMurkIceArm(iceSeeds[si], iH, skip, iW, mirrored);
 		si = si + 1;
 	end
+end
+------------------------------------------------------------------------------
+-- Sea ice packed right at the (0, iH-1) corner tip, denser near the corner
+-- and thinning out with distance, as a visual anchor for "this is the
+-- coldest point on the map" -- FeatureGenerator:AddIceAtPlot is a no-op
+-- everywhere in this mapscript (every climate that wants ice has to place
+-- it itself, see AddNorthIceArms above for Murky's own version), so Frosty
+-- needs its own now that the old warmth-model AddFrostyIce is gone.
+function AddFrostyCornerIce()
+	local cfg = GetBarrierConfig();
+	if cfg == nil or cfg.kind ~= "frosty" then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local mirrored = (DEF_MIRRORED == 1);
+	local cx, cy = 0, iH - 1;
+	local radius = 6;
+	local n = 0;
+	local y = math.max(0, cy - radius);
+	while y <= cy do
+		local x = 0;
+		while x <= radius do
+			if MirrorOwnsPlot(x, y, mirrored, iW) then
+				local d = Map.PlotDistance(cx, cy, x, y);
+				if d <= radius then
+					local plot = Map.GetPlot(x, y);
+					if plot ~= nil and plot:IsWater() and plot:GetFeatureType() == FeatureTypes.NO_FEATURE then
+						local chance = 85 - (d * 12);
+						if chance > 0 and Map.Rand(100, "Frosty Corner Ice") < chance then
+							plot:SetFeatureType(FeatureTypes.FEATURE_ICE, -1);
+							n = n + 1;
+						end
+					end
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	print("Frosty corner ice:", n);
 end
 ------------------------------------------------------------------------------
 function CountMireMountainNeighbors(plot)
