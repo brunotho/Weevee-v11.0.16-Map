@@ -3739,20 +3739,28 @@ function GetSnowWrapTundraColumns(iW, y)
 		table.insert(cols, iW - half - 1);
 	end
 	if centerN > 0 and IsBramble() == false then
-		-- West-side transition column only used to be mid-half-1, one
-		-- column further into real, playable west territory than the
-		-- actual barrier itself (mid-half..mid+half-1, from
-		-- GetSnowWrapColumns) -- but that column still gets ordinary
-		-- resource placement from vanilla (nothing about "skip" bookkeeping
-		-- stops vanilla's own placement, only our own generation passes
-		-- respect it), so forcing it to the barrier's transition terrain
-		-- painted over real, resourced land instead of only the actual dead
-		-- barrier zone. Dropped entirely -- pre-mirror, that's one full
-		-- column of transition terrain removed. The east-side entry
-		-- (mid+half) is kept for symmetry; it's already a no-op under
-		-- mirroring (MirrorOwnsPlot filters it out at every call site) and
-		-- only matters if this is ever used unmirrored.
+		-- West-side transition column (mid-half-1, one column further into
+		-- real, playable west territory than the barrier itself) is a
+		-- deliberate visual cut several climates depend on: their barrier
+		-- terrain reads similar to their own econ-zone terrain (Oasis,
+		-- Peaky), so without this one-column marker there's no visible line
+		-- at all between "econ zone" and "dead barrier zone" -- confirmed
+		-- by an actual regression when this was dropped for every climate
+		-- in an earlier pass (Peaky/Oasis both lost their separator
+		-- entirely). Standard and Frosty are genuine exceptions, not part
+		-- of that same pattern: their contrast already comes from the
+		-- barrier's own terrain kind reading as visibly different from
+		-- their econ zone on its own (Snow vs. never-Snow for Standard; a
+		-- solid Tundra corner nowhere near the econ zone's own tundra --
+		-- which sits well back at the polar corner, not against the
+		-- barrier -- for Frosty), so the extra marker column is only
+		-- omitted for those two.
+		local cfg = GetBarrierConfig();
+		local skipWestColumn = cfg ~= nil and (cfg.kind == "snow" or cfg.kind == "frosty");
 		local half = centerN / 2;
+		if skipWestColumn == false then
+			table.insert(cols, mid - half - 1);
+		end
 		table.insert(cols, mid + half);
 	end
 	return cols;
