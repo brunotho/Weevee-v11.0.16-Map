@@ -456,6 +456,18 @@ function ResolveSaltWaterPlan()
 		if cfg ~= nil and cfg.kind == "frosty" then
 			saltCutPct = 30;
 			saltNSeas = 1 + Map.Rand(2, "Frosty Inland Seas");
+		elseif cfg ~= nil and cfg.kind == "peaks" then
+			-- Inland seas were never actually carved as a distinct feature
+			-- for this climate -- nothing downstream consumes saltNSeas here,
+			-- it's cutPct alone that decides how much of the back coast's
+			-- vertical extent becomes real water vs. forced flat land (see
+			-- ShapeNoWrapBackstrip). A 50/50 roll used to sacrifice up to half
+			-- that budget to a "sea" that was never drawn, for nothing.
+			-- Pinning cutPct low instead reallocates virtually the whole
+			-- salt-water budget to one continuous, mostly full-height back
+			-- coast, giving AddPeaksBackCoastIslands real room to work with.
+			saltCutPct = 5 + Map.Rand(8, "Peaks BackCoast Cut");
+			saltNSeas = 0;
 		elseif Map.Rand(2, "Explo back coast plan") == 0 then
 			saltCutPct = 50;
 			saltNSeas = 2;
@@ -4082,6 +4094,15 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 	local nIslands = 3 + Map.Rand(3, "NoWrap Back Islands");
 	local frostyCfg = GetBarrierConfig();
 	local isFrosty = frostyCfg ~= nil and frostyCfg.kind == "frosty";
+	-- Peaky claims a wider (more horizontal), mostly full-height back coast
+	-- instead of the default 3-column strip -- see ResolveSaltWaterPlan's
+	-- own peaks branch for the matching cutPct reduction. Actual islands are
+	-- no longer placed here at all: they're carved by AddPeaksBackCoastIslands
+	-- once terrain has settled, since AddPeaksLayout's own land-flatten pass
+	-- (which runs after this, during GenerateTerrain) would otherwise wipe
+	-- anything placed at the plotTypes-array stage right back to flat land.
+	local isPeaks = frostyCfg ~= nil and frostyCfg.kind == "peaks";
+	local backMax = isPeaks and 4 or 2;
 	if UsesExploCoastShape() then
 		minD = 1;
 		maxD = 2;
@@ -4091,6 +4112,11 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 			minD = 2;
 			maxD = 3;
 			depth = 2;
+		elseif isPeaks then
+			minD = 2;
+			maxD = 4;
+			depth = 3;
+			nIslands = 0;
 		end
 	end
 	local y = 0;
@@ -4104,11 +4130,11 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 			depth = maxD;
 		end
 		local x = 0;
-		while x <= 2 do
+		while x <= backMax do
 			local i = y * iW + x + 1;
 			if x < depth then
 				plotTypes[i] = PlotTypes.PLOT_OCEAN;
-			elseif x <= 1 then
+			elseif x <= backMax - 1 then
 				plotTypes[i] = PlotTypes.PLOT_LAND;
 			end
 			x = x + 1;
@@ -4141,7 +4167,7 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 		while y < iH do
 			if y < winY0 or y >= winY1 then
 				local x = 0;
-				while x <= 2 do
+				while x <= backMax do
 					plotTypes[y * iW + x + 1] = PlotTypes.PLOT_LAND;
 					x = x + 1;
 				end
@@ -4279,7 +4305,7 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 	y = 0;
 	while y < iH do
 		local x = 0;
-		while x <= 3 do
+		while x <= math.max(backMax, 3) do
 			local mx = iW - x - 1;
 			local my = iH - y - 1;
 			plotTypes[my * iW + mx + 1] = plotTypes[y * iW + x + 1];
@@ -14909,14 +14935,17 @@ function PeakPlotUsable(plot, skip, mirrored, iW, frontBand)
 end
 ------------------------------------------------------------------------------
 function PeakBlobTargetSize()
+	-- Mid/Big bases dropped by 1 each (Tiny left alone, already the floor) --
+	-- weighted by their 65%/15% roll odds that's exactly a 0.8 reduction in
+	-- the average massif size (5.2 -> 4.4 mountains per peak).
 	local r = Map.Rand(100, "Peaks Blob Size");
 	if r < 20 then
 		return 2 + Map.Rand(2, "Peaks Blob Tiny");
 	end
 	if r < 85 then
-		return 5 + Map.Rand(2, "Peaks Blob Mid");
+		return 4 + Map.Rand(2, "Peaks Blob Mid");
 	end
-	return 7 + Map.Rand(2, "Peaks Blob Big");
+	return 6 + Map.Rand(2, "Peaks Blob Big");
 end
 ------------------------------------------------------------------------------
 function PeakCountBlobNeighbors(plot, q)
@@ -15132,16 +15161,19 @@ end
 function PeakRollMassifKnobs()
 	nPeakMassifs = nPeakMassifs + 1;
 	local id = nPeakMassifs;
+	-- Thresholds nudged up from their previous values (fewer tiles clear the
+	-- now-higher fractal-percentile bar, so the collar reads slightly
+	-- thinner) and widened a little for more massif-to-massif variety.
 	if Map.Rand(2, "Peaks Hill Style") == 0 then
 		peakHillStyle[id] = 1;
 		peakHillT1[id] = 0;
-		peakHillT2[id] = 22 + Map.Rand(18, "Peaks Thick T2");
-		peakHillT3[id] = 88 + Map.Rand(10, "Peaks Thick T3");
+		peakHillT2[id] = 28 + Map.Rand(20, "Peaks Thick T2");
+		peakHillT3[id] = 92 + Map.Rand(8, "Peaks Thick T3");
 	else
 		peakHillStyle[id] = 2;
-		peakHillT1[id] = 26 + Map.Rand(24, "Peaks Spike T1");
-		peakHillT2[id] = 40 + Map.Rand(20, "Peaks Spike T2");
-		peakHillT3[id] = 55 + Map.Rand(22, "Peaks Spike T3");
+		peakHillT1[id] = 32 + Map.Rand(26, "Peaks Spike T1");
+		peakHillT2[id] = 46 + Map.Rand(22, "Peaks Spike T2");
+		peakHillT3[id] = 62 + Map.Rand(24, "Peaks Spike T3");
 	end
 	local fr = Map.Rand(100, "Peaks Forest Style");
 	if fr < 38 then
@@ -15414,6 +15446,16 @@ function AddPeaksLayout()
 		end
 	end
 	local hillFrac = Fractal.Create(iW, iH, 5, Map.GetFractalFlags(), -1, -1);
+	-- Independent, differently-grained noise field layered on top of the
+	-- smooth per-massif-style collar below, so its edge reads as ragged and
+	-- organic instead of a clean concentric ring: a chance to drop a tile
+	-- the style/threshold check would have made a hill, and a chance to add
+	-- one it wouldn't have -- extended out to d==4/5, which the style
+	-- thresholds never touch at all otherwise (nothing between the d<=3
+	-- collar and the sparse d>=6 far-hill roll).
+	local noiseFrac = Fractal.Create(iW, iH, 6, Map.GetFractalFlags(), -1, -1);
+	local noiseLoThresh = noiseFrac:GetHeight(14);
+	local noiseHiThresh = noiseFrac:GetHeight(92);
 	local nHill = 0;
 	y = 0;
 	while y < iH do
@@ -15465,6 +15507,14 @@ function AddPeaksLayout()
 								end
 							end
 						end
+						if d < INF and d <= 5 then
+							local nz = noiseFrac:GetHeight(x, y);
+							if nz < noiseLoThresh then
+								makeHill = false;
+							elseif nz >= noiseHiThresh then
+								makeHill = true;
+							end
+						end
 						if makeHill == false and d >= 6 and d < INF and Map.Rand(100, "Peaks Far Hill") < 8 then
 							makeHill = true;
 						end
@@ -15488,6 +15538,137 @@ function AddPeaksLayout()
 	PeakScatterFrontRelief();
 	AddPeaksStrayMountains();
 	AddPeaksRainShadowDesert();
+	AddPeaksBackCoastIslands();
+end
+------------------------------------------------------------------------------
+-- Populates the wide, mostly full-height back coast ShapeNoWrapBackstrip
+-- carves for Peaky (see its own peaks branch, and ResolveSaltWaterPlan's
+-- matching cutPct reduction) with a much denser scatter of islands than the
+-- 1-2 any other no-wrap climate gets. Deliberately NOT done at the
+-- plotTypes-array stage inside ShapeNoWrapBackstrip itself: that runs
+-- before AddPeaksLayout's own land-flatten pass above, which would just
+-- wipe any land/mountain placed there straight back to flat land. Running
+-- after AddPeaksLayout instead means everything here operates on committed
+-- Map plots that nothing downstream resets.
+function AddPeaksBackCoastIslands()
+	local cfg = GetBarrierConfig();
+	if cfg == nil or cfg.kind ~= "peaks" then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local mirrored = (DEF_MIRRORED == 1);
+	local bandMax = 4;
+	local function touchesMainland(plot)
+		local d = 0;
+		while d < DirectionTypes.NUM_DIRECTION_TYPES do
+			local adj = PlotDirNoXWrap(plot:GetX(), plot:GetY(), d);
+			if adj ~= nil and adj:IsWater() == false and adj:GetX() > bandMax then
+				return true
+			end
+			d = d + 1;
+		end
+		return false;
+	end
+	local function touchesLand(plot)
+		local d = 0;
+		while d < DirectionTypes.NUM_DIRECTION_TYPES do
+			local adj = PlotDirNoXWrap(plot:GetX(), plot:GetY(), d);
+			if adj ~= nil and adj:IsWater() == false then
+				return true
+			end
+			d = d + 1;
+		end
+		return false;
+	end
+	local claimed = {};
+	local function isClaimed(x, y)
+		return claimed[y * iW + x] == true;
+	end
+	local function claim(x, y)
+		claimed[y * iW + x] = true;
+	end
+	local candidates = {};
+	local y = 2;
+	while y < iH - 2 do
+		local x = 0;
+		while x <= bandMax do
+			if MirrorOwnsPlot(x, y, mirrored, iW) then
+				local plot = Map.GetPlot(x, y);
+				if plot ~= nil and plot:IsWater() then
+					table.insert(candidates, plot);
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	candidates = GetShuffledCopyOfTable(candidates);
+	local target = 9 + Map.Rand(6, "Peaks BackCoast Island Count");
+	local placed = 0;
+	local ci = 1;
+	while placed < target and ci <= #candidates do
+		local seed = candidates[ci];
+		ci = ci + 1;
+		local sx, sy = seed:GetX(), seed:GetY();
+		if seed:IsWater() and isClaimed(sx, sy) == false and touchesMainland(seed) == false and touchesLand(seed) == false then
+			-- Often a tiny peak (a splintered cliff of mountain sticking out
+			-- of the water) to match the "islands heavily encouraged" request
+			-- and echo the inland massifs' own look; otherwise a plain small
+			-- land/hill islet for variety.
+			local isPeak = Map.Rand(100, "Peaks BackCoast Island Peak") < 55;
+			local footprint = {{sx, sy}};
+			if isPeak then
+				seed:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
+			elseif Map.Rand(3, "Peaks BackCoast Island Hill") == 0 then
+				seed:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
+			else
+				seed:SetPlotType(PlotTypes.PLOT_LAND, false, false);
+			end
+			seed:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+			-- A small halo (1-2 tiles) so even the peak islands carry a bit
+			-- of surrounding land/hill, the same collar vibe as the inland
+			-- massifs, instead of reading as a single bare rock.
+			local haloTarget = 1 + Map.Rand(2, "Peaks BackCoast Island Halo");
+			local haloGrown = 0;
+			local d0 = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Peaks BackCoast Island Halo Dir");
+			local k = 0;
+			while k < DirectionTypes.NUM_DIRECTION_TYPES and haloGrown < haloTarget do
+				local d = (d0 + k) % DirectionTypes.NUM_DIRECTION_TYPES;
+				k = k + 1;
+				local adj = PlotDirNoXWrap(sx, sy, d);
+				if adj ~= nil and adj:GetX() <= bandMax and adj:IsWater()
+					and isClaimed(adj:GetX(), adj:GetY()) == false
+					and touchesMainland(adj) == false then
+					if isPeak and Map.Rand(2, "Peaks BackCoast Island Halo Type") == 0 then
+						adj:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
+					else
+						adj:SetPlotType(PlotTypes.PLOT_LAND, false, false);
+					end
+					adj:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+					table.insert(footprint, {adj:GetX(), adj:GetY()});
+					haloGrown = haloGrown + 1;
+				end
+			end
+			-- Claim the footprint plus a 1-tile moat around it so islands
+			-- stay visually separated instead of fusing into one blob.
+			local fi = 1;
+			while fi <= #footprint do
+				local fx, fy = footprint[fi][1], footprint[fi][2];
+				claim(fx, fy);
+				local dd = 0;
+				while dd < DirectionTypes.NUM_DIRECTION_TYPES do
+					local madj = PlotDirNoXWrap(fx, fy, dd);
+					if madj ~= nil then
+						claim(madj:GetX(), madj:GetY());
+					end
+					dd = dd + 1;
+				end
+				fi = fi + 1;
+			end
+			placed = placed + 1;
+		end
+	end
+	print("Peaks back-coast islands placed:", placed, "/", target);
 end
 ------------------------------------------------------------------------------
 function AddPeaksRainShadowDesert()
