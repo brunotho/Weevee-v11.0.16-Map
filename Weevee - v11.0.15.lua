@@ -9555,15 +9555,35 @@ function PlotDirNoXWrap(x, y, direction)
 	return p;
 end
 ------------------------------------------------------------------------------
+-- The west/east barrier strip (RowMireSkip's columns, plus Bramble's own
+-- separator) is normally dry land as far as the river walk is concerned --
+-- ClearRiversNearBarrier only wipes river edges that land inside it well
+-- after the fact, which used to leave a river dead-ending right at the
+-- barrier's edge on dry land instead of reaching real water. Shared by
+-- GetRiverValueAtPlot (steer away from it while a real alternative exists)
+-- and DoRiver's own stop condition (treat reaching it as a natural end,
+-- same as reaching water, instead of drawing edges inside a zone that's
+-- just going to get stripped afterward).
+function IsRiverBarrierColumn(x, y)
+	if x == nil or y == nil then
+		return false
+	end
+	local iW = Map.GetGridSize();
+	if RowMireSkip(iW, y)[x] == true then
+		return true
+	end
+	return TongueIsBarrierPlot(x, y);
+end
+------------------------------------------------------------------------------
 function GetRiverValueAtPlot(plot)
-	-- Custom method to force rivers to flow away from the map center.
-	local iW, iH = Map.GetGridSize()
 	local x = plot:GetX()
 	local y = plot:GetY()
-	local random_factor = Map.Rand(3, "River direction random factor - Skirmish LUA");
-	local direction_influence_value = 0;--(math.abs(iW - (x - (iW / 2))) + ((math.abs(y - (iH / 2))) / 3)) * random_factor;
-
 	local numPlots = PlotTypes.NUM_PLOT_TYPES;
+	local direction_influence_value = 0;
+	if IsRiverBarrierColumn(x, y) then
+		direction_influence_value = numPlots * 50;
+	end
+
 	local sum = ((numPlots - plot:GetPlotType()) * 20) + direction_influence_value;
 
 	local numDirections = DirectionTypes.NUM_DIRECTION_TYPES;
@@ -9693,9 +9713,12 @@ function DoRiver(startPlot, thisFlowDirection, originalFlowDirection, riverID)
 		riverPlot = startPlot;		
 	end
 
-	if (riverPlot == nil or riverPlot:IsWater()) then
-		-- The river has flowed off the edge of the map or into the ocean. All is well.
-		return; 
+	if (riverPlot == nil or riverPlot:IsWater() or IsRiverBarrierColumn(riverPlot:GetX(), riverPlot:GetY())) then
+		-- The river has flowed off the edge of the map, into the ocean, or up
+		-- to the west/east barrier strip -- all three are treated as a
+		-- natural end, so the walk never draws edges referencing a plot
+		-- inside the barrier for ClearRiversNearBarrier to strip out later.
+		return;
 	end
 
 	-- Storing X,Y positions as locals to prevent redundant function calls.
@@ -9896,27 +9919,98 @@ function CullShortRivers()
 	-- has no guarantee of reaching water on any climate, it's just more
 	-- visible on a small map like Standard-Diagonal's. Generalized to run
 	-- everywhere rather than inventing a second copy of the same logic.
+	--
+	-- Grouping by the riverID DoRiver originally assigned (as this used to)
+	-- is wrong once anything runs after AddRivers that can cut a river into
+	-- pieces (ClearRiversNearBarrier, OasisStripWestHinterlandRivers, ...):
+	-- two now-disconnected fragments that happen to share an old riverID
+	-- got judged together, so a short landlocked stub could dodge deletion
+	-- just because a different, unrelated fragment sharing that riverID
+	-- touched water somewhere else entirely. This instead flood-fills over
+	-- the CURRENTLY live edges (the same approach CullWestCoastShortRivers
+	-- already uses below, just not restricted to its west-coast columns),
+	-- so each judgement is about one actually-connected piece of river.
+	local iW, iH = Map.GetGridSize();
+	local function edgeKey(x, y, kind)
+		return y * iW * 4 + x * 4 + ({W = 1, NW = 2, NE = 3})[kind];
+	end
+	local function addPlotEdges(plot, list)
+		if plot == nil then
+			return
+		end
+		local x, y = plot:GetX(), plot:GetY();
+		if plot:IsWOfRiver() then
+			table.insert(list, {x, y, "W"});
+		end
+		if plot:IsNWOfRiver() then
+			table.insert(list, {x, y, "NW"});
+		end
+		if plot:IsNEOfRiver() then
+			table.insert(list, {x, y, "NE"});
+		end
+	end
+	local seen = {};
 	local nDrop = 0;
-	local rid, edges;
-	for rid, edges in pairs(riverEdgeList) do
-		local n = 0;
-		local i = 1;
-		while i <= #edges do
-			local e = edges[i];
-			if RiverEdgeStillSet(Map.GetPlot(e[1], e[2]), e[3]) then
-				n = n + 1;
+	local y = 0;
+	while y < iH do
+		local x = 0;
+		while x < iW do
+			local plot = Map.GetPlot(x, y);
+			if plot ~= nil then
+				local start = {};
+				addPlotEdges(plot, start);
+				local si = 1;
+				while si <= #start do
+					local e0 = start[si];
+					local k0 = edgeKey(e0[1], e0[2], e0[3]);
+					if seen[k0] ~= true then
+						local comp = {};
+						local qx, qy = {e0[1]}, {e0[2]};
+						local qi = 1;
+						seen[k0] = true;
+						table.insert(comp, e0);
+						while qi <= #qx do
+							local cx, cy = qx[qi], qy[qi];
+							local around = {};
+							addPlotEdges(Map.GetPlot(cx, cy), around);
+							local d = 0;
+							while d < DirectionTypes.NUM_DIRECTION_TYPES do
+								local adj = PlotDirNoXWrap(cx, cy, d);
+								if adj ~= nil then
+									addPlotEdges(adj, around);
+								end
+								d = d + 1;
+							end
+							local ai = 1;
+							while ai <= #around do
+								local ae = around[ai];
+								local ak = edgeKey(ae[1], ae[2], ae[3]);
+								if seen[ak] ~= true then
+									seen[ak] = true;
+									table.insert(comp, ae);
+									table.insert(qx, ae[1]);
+									table.insert(qy, ae[2]);
+								end
+								ai = ai + 1;
+							end
+							qi = qi + 1;
+						end
+						local n = #comp;
+						if n > 0 and n <= 5 and RiverEdgesTouchWater(comp) == false then
+							local ci = 1;
+							while ci <= n do
+								ClearRiverEdge(Map.GetPlot(comp[ci][1], comp[ci][2]), comp[ci][3]);
+								ci = ci + 1;
+							end
+							nDrop = nDrop + 1;
+						end
+					end
+					si = si + 1;
+				end
 			end
-			i = i + 1;
+			x = x + 1;
 		end
-		if n > 0 and n <= 5 and RiverEdgesTouchWater(edges) == false then
-			i = 1;
-			while i <= #edges do
-				local e = edges[i];
-				ClearRiverEdge(Map.GetPlot(e[1], e[2]), e[3]);
-				i = i + 1;
-			end
-			nDrop = nDrop + 1;
-		end
+		y = y + 1;
 	end
 	print("Dead-end short rivers dropped:", nDrop);
 end
