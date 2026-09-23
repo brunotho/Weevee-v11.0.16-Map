@@ -463,10 +463,14 @@ function ResolveSaltWaterPlan()
 			-- vertical extent becomes real water vs. forced flat land (see
 			-- ShapeNoWrapBackstrip). A 50/50 roll used to sacrifice up to half
 			-- that budget to a "sea" that was never drawn, for nothing.
-			-- Pinning cutPct low instead reallocates virtually the whole
-			-- salt-water budget to one continuous, mostly full-height back
-			-- coast, giving AddPeaksBackCoastIslands real room to work with.
-			saltCutPct = 5 + Map.Rand(8, "Peaks BackCoast Cut");
+			-- Pinning cutPct here (and anchoring the kept window to a north
+			-- or south corner in ShapeNoWrapBackstrip, rather than letting it
+			-- float anywhere) reallocates the salt-water budget into one
+			-- compact corner blob instead of a long thin stretch the full
+			-- height of the back coast -- room for one proper peak-island
+			-- plus a handful of splinters, not a scatter of tiny islets
+			-- stretched the whole way up the map.
+			saltCutPct = 60 + Map.Rand(16, "Peaks BackCoast Cut");
 			saltNSeas = 0;
 		elseif Map.Rand(2, "Explo back coast plan") == 0 then
 			saltCutPct = 50;
@@ -4175,6 +4179,17 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 		if frostyCfg ~= nil and frostyCfg.kind == "frosty" then
 			winY0 = iH - keepH;
 			winY1 = iH;
+		elseif isPeaks then
+			-- Anchored to a north or south corner rather than floating
+			-- anywhere along the height -- a "west, north or south corner"
+			-- blob instead of a strip that could land centered on the coast.
+			if Map.Rand(2, "Peaks BackCoast Corner") == 0 then
+				winY0 = 0;
+				winY1 = keepH;
+			else
+				winY0 = iH - keepH;
+				winY1 = iH;
+			end
 		else
 			if iH > keepH then
 				winY0 = Map.Rand(iH - keepH + 1, "Explo back coast window");
@@ -15604,10 +15619,13 @@ function AddPeaksLayout()
 	AddPeaksBackCoastIslands();
 end
 ------------------------------------------------------------------------------
--- Populates the wide, mostly full-height back coast ShapeNoWrapBackstrip
--- carves for Peaky (see its own peaks branch, and ResolveSaltWaterPlan's
--- matching cutPct reduction) with a much denser scatter of islands than the
--- 1-2 any other no-wrap climate gets. Deliberately NOT done at the
+-- Populates the back-coast corner blob ShapeNoWrapBackstrip carves for
+-- Peaky (see its own peaks branch, and ResolveSaltWaterPlan's matching
+-- cutPct/corner-anchoring) with one proper peak-island (a small connected
+-- massif with its own hill/land collar, echoing the inland massifs) plus a
+-- handful of tiny splintered cliffs -- not a dense scatter of tiny islets,
+-- which read as clutter once the coast stopped being a thin full-height
+-- stretch and became a compact blob. Deliberately NOT done at the
 -- plotTypes-array stage inside ShapeNoWrapBackstrip itself: that runs
 -- before AddPeaksLayout's own land-flatten pass above, which would just
 -- wipe any land/mountain placed there straight back to flat land. Running
@@ -15647,91 +15665,126 @@ function AddPeaksBackCoastIslands()
 	local function isClaimed(x, y)
 		return claimed[y * iW + x] == true;
 	end
-	local function claim(x, y)
-		claimed[y * iW + x] = true;
-	end
-	local candidates = {};
-	local y = 2;
-	while y < iH - 2 do
-		local x = 0;
-		while x <= bandMax do
-			if MirrorOwnsPlot(x, y, mirrored, iW) then
-				local plot = Map.GetPlot(x, y);
-				if plot ~= nil and plot:IsWater() then
-					table.insert(candidates, plot);
+	local function claimWithMoat(footprint)
+		local fi = 1;
+		while fi <= #footprint do
+			local fx, fy = footprint[fi][1], footprint[fi][2];
+			claimed[fy * iW + fx] = true;
+			local dd = 0;
+			while dd < DirectionTypes.NUM_DIRECTION_TYPES do
+				local madj = PlotDirNoXWrap(fx, fy, dd);
+				if madj ~= nil then
+					claimed[madj:GetY() * iW + madj:GetX()] = true;
 				end
+				dd = dd + 1;
 			end
-			x = x + 1;
+			fi = fi + 1;
 		end
-		y = y + 1;
 	end
-	candidates = GetShuffledCopyOfTable(candidates);
-	local target = 9 + Map.Rand(6, "Peaks BackCoast Island Count");
-	local placed = 0;
+	local function gatherCandidates()
+		local cands = {};
+		local y = 2;
+		while y < iH - 2 do
+			local x = 0;
+			while x <= bandMax do
+				if MirrorOwnsPlot(x, y, mirrored, iW) then
+					local plot = Map.GetPlot(x, y);
+					if plot ~= nil and plot:IsWater() and isClaimed(x, y) == false
+						and touchesMainland(plot) == false and touchesLand(plot) == false then
+						table.insert(cands, plot);
+					end
+				end
+				x = x + 1;
+			end
+			y = y + 1;
+		end
+		return GetShuffledCopyOfTable(cands);
+	end
+	-- Small hill/land halo around a footprint, matching the inland massifs'
+	-- own collar vibe instead of reading as a bare rock.
+	local function growHalo(footprint, seed, isPeak, haloTarget)
+		local sx, sy = seed:GetX(), seed:GetY();
+		local haloGrown = 0;
+		local d0 = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Peaks BackCoast Island Halo Dir");
+		local k = 0;
+		while k < DirectionTypes.NUM_DIRECTION_TYPES and haloGrown < haloTarget do
+			local d = (d0 + k) % DirectionTypes.NUM_DIRECTION_TYPES;
+			k = k + 1;
+			local adj = PlotDirNoXWrap(sx, sy, d);
+			if adj ~= nil and adj:GetX() <= bandMax and adj:IsWater()
+				and isClaimed(adj:GetX(), adj:GetY()) == false
+				and touchesMainland(adj) == false then
+				if isPeak and Map.Rand(2, "Peaks BackCoast Island Halo Type") == 0 then
+					adj:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
+				else
+					adj:SetPlotType(PlotTypes.PLOT_LAND, false, false);
+				end
+				adj:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+				table.insert(footprint, {adj:GetX(), adj:GetY()});
+				haloGrown = haloGrown + 1;
+			end
+		end
+	end
+	-- The one proper peak island: a small connected mountain massif (3-5
+	-- tiles), not just a single splinter, with a real 2-3 tile collar.
+	local nPeakPlaced = 0;
+	local candidates = gatherCandidates();
 	local ci = 1;
-	while placed < target and ci <= #candidates do
+	while nPeakPlaced < 1 and ci <= #candidates do
 		local seed = candidates[ci];
 		ci = ci + 1;
-		local sx, sy = seed:GetX(), seed:GetY();
-		if seed:IsWater() and isClaimed(sx, sy) == false and touchesMainland(seed) == false and touchesLand(seed) == false then
-			-- Often a tiny peak (a splintered cliff of mountain sticking out
-			-- of the water) to match the "islands heavily encouraged" request
-			-- and echo the inland massifs' own look; otherwise a plain small
-			-- land/hill islet for variety.
-			local isPeak = Map.Rand(100, "Peaks BackCoast Island Peak") < 55;
-			local footprint = {{sx, sy}};
-			if isPeak then
-				seed:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
-			elseif Map.Rand(3, "Peaks BackCoast Island Hill") == 0 then
-				seed:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
-			else
-				seed:SetPlotType(PlotTypes.PLOT_LAND, false, false);
-			end
+		if seed:IsWater() and isClaimed(seed:GetX(), seed:GetY()) == false then
+			local target = 3 + Map.Rand(3, "Peaks BackCoast Peak Island Size");
+			local footprint = {{seed:GetX(), seed:GetY()}};
+			seed:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
 			seed:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-			-- A small halo (1-2 tiles) so even the peak islands carry a bit
-			-- of surrounding land/hill, the same collar vibe as the inland
-			-- massifs, instead of reading as a single bare rock.
-			local haloTarget = 1 + Map.Rand(2, "Peaks BackCoast Island Halo");
-			local haloGrown = 0;
-			local d0 = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Peaks BackCoast Island Halo Dir");
-			local k = 0;
-			while k < DirectionTypes.NUM_DIRECTION_TYPES and haloGrown < haloTarget do
-				local d = (d0 + k) % DirectionTypes.NUM_DIRECTION_TYPES;
-				k = k + 1;
-				local adj = PlotDirNoXWrap(sx, sy, d);
-				if adj ~= nil and adj:GetX() <= bandMax and adj:IsWater()
-					and isClaimed(adj:GetX(), adj:GetY()) == false
-					and touchesMainland(adj) == false then
-					if isPeak and Map.Rand(2, "Peaks BackCoast Island Halo Type") == 0 then
-						adj:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
-					else
-						adj:SetPlotType(PlotTypes.PLOT_LAND, false, false);
+			local qi = 1;
+			while qi <= #footprint and #footprint < target do
+				local px, py = footprint[qi][1], footprint[qi][2];
+				local d0 = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Peaks BackCoast Peak Island Grow Dir");
+				local k = 0;
+				while k < DirectionTypes.NUM_DIRECTION_TYPES and #footprint < target do
+					local d = (d0 + k) % DirectionTypes.NUM_DIRECTION_TYPES;
+					k = k + 1;
+					local adj = PlotDirNoXWrap(px, py, d);
+					if adj ~= nil and adj:GetX() <= bandMax and adj:IsWater()
+						and isClaimed(adj:GetX(), adj:GetY()) == false
+						and touchesMainland(adj) == false
+						and Map.Rand(100, "Peaks BackCoast Peak Island Grow") < 70 then
+						adj:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
+						adj:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+						table.insert(footprint, {adj:GetX(), adj:GetY()});
 					end
-					adj:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-					table.insert(footprint, {adj:GetX(), adj:GetY()});
-					haloGrown = haloGrown + 1;
 				end
+				qi = qi + 1;
 			end
-			-- Claim the footprint plus a 1-tile moat around it so islands
-			-- stay visually separated instead of fusing into one blob.
-			local fi = 1;
-			while fi <= #footprint do
-				local fx, fy = footprint[fi][1], footprint[fi][2];
-				claim(fx, fy);
-				local dd = 0;
-				while dd < DirectionTypes.NUM_DIRECTION_TYPES do
-					local madj = PlotDirNoXWrap(fx, fy, dd);
-					if madj ~= nil then
-						claim(madj:GetX(), madj:GetY());
-					end
-					dd = dd + 1;
-				end
-				fi = fi + 1;
-			end
-			placed = placed + 1;
+			growHalo(footprint, seed, true, 2 + Map.Rand(2, "Peaks BackCoast Peak Island Halo"));
+			claimWithMoat(footprint);
+			nPeakPlaced = 1;
 		end
 	end
-	print("Peaks back-coast islands placed:", placed, "/", target);
+	-- A handful of tiny splintered cliffs sprinkled around the same blob --
+	-- mostly bare rock (rarely a token 1-tile halo), distinct from the one
+	-- proper peak island above.
+	local nSplinterTarget = 3 + Map.Rand(4, "Peaks BackCoast Splinter Count");
+	local nSplinterPlaced = 0;
+	candidates = gatherCandidates();
+	ci = 1;
+	while nSplinterPlaced < nSplinterTarget and ci <= #candidates do
+		local seed = candidates[ci];
+		ci = ci + 1;
+		if seed:IsWater() and isClaimed(seed:GetX(), seed:GetY()) == false then
+			local footprint = {{seed:GetX(), seed:GetY()}};
+			seed:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
+			seed:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+			if Map.Rand(100, "Peaks BackCoast Splinter Halo Chance") < 30 then
+				growHalo(footprint, seed, true, 1);
+			end
+			claimWithMoat(footprint);
+			nSplinterPlaced = nSplinterPlaced + 1;
+		end
+	end
+	print("Peaks back-coast islands: peak island=", nPeakPlaced, " splinters=", nSplinterPlaced, "/", nSplinterTarget);
 end
 ------------------------------------------------------------------------------
 function AddPeaksRainShadowDesert()
