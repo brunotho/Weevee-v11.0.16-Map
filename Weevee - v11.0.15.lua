@@ -2763,9 +2763,12 @@ function AssignStartingPlots:PlaceImpactAndRipples(x, y)
 	end
 	return PlaceImpactAndRipplesVanilla(self, x, y);
 end
--- Oasis: bump deferred lux (impact 2, max_radius ≤ 1) to at least ripple 1.
--- Do NOT convert impact -1: that ignore-overlay path is how vanilla plants
--- regionals on the capital after PlaceImpactAndRipples already stamped r=3.
+-- Every climate, not just Oasis: bump deferred lux (impact 2, max_radius
+-- <= 1) to at least ripple 1, so same-type luxuries scattered around a
+-- region can't land immediately adjacent to each other. Do NOT convert
+-- impact -1: that ignore-overlay path is how vanilla plants regionals on
+-- the capital after PlaceImpactAndRipples already stamped r=3 -- those are
+-- meant to cluster tightly and should stay at ripple 0.
 local PlaceSpecificNumberOfResourcesVanilla = AssignStartingPlots.PlaceSpecificNumberOfResources;
 function AssignStartingPlots:PlaceSpecificNumberOfResources(resource_ID, quantity, amount, ratio, impact_table_number, min_radius, max_radius, plot_list)
 	if IsWeeveeLuxuryID(resource_ID) and plot_list ~= nil then
@@ -2780,7 +2783,7 @@ function AssignStartingPlots:PlaceSpecificNumberOfResources(resource_ID, quantit
 		end
 		plot_list = filtered;
 	end
-	if IsOasisClimate() and IsWeeveeLuxuryID(resource_ID) then
+	if IsWeeveeLuxuryID(resource_ID) then
 		if impact_table_number == 2 then
 			local maxR = max_radius;
 			if maxR == nil then
@@ -3721,8 +3724,20 @@ function GetSnowWrapTundraColumns(iW, y)
 		table.insert(cols, iW - half - 1);
 	end
 	if centerN > 0 and IsBramble() == false then
+		-- West-side transition column only used to be mid-half-1, one
+		-- column further into real, playable west territory than the
+		-- actual barrier itself (mid-half..mid+half-1, from
+		-- GetSnowWrapColumns) -- but that column still gets ordinary
+		-- resource placement from vanilla (nothing about "skip" bookkeeping
+		-- stops vanilla's own placement, only our own generation passes
+		-- respect it), so forcing it to the barrier's transition terrain
+		-- painted over real, resourced land instead of only the actual dead
+		-- barrier zone. Dropped entirely -- pre-mirror, that's one full
+		-- column of transition terrain removed. The east-side entry
+		-- (mid+half) is kept for symmetry; it's already a no-op under
+		-- mirroring (MirrorOwnsPlot filters it out at every call site) and
+		-- only matters if this is ever used unmirrored.
 		local half = centerN / 2;
-		table.insert(cols, mid - half - 1);
 		table.insert(cols, mid + half);
 	end
 	return cols;
@@ -4283,16 +4298,24 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 	-- GenerateTerrain) would otherwise wipe anything placed at the
 	-- plotTypes-array stage right back to flat land.
 	local isPeaks = frostyCfg ~= nil and frostyCfg.kind == "peaks";
-	local backMax = isPeaks and 8 or 2;
+	local backMax = isPeaks and 8 or (isFrosty and 5 or 2);
 	if UsesExploCoastShape() then
 		minD = 1;
 		maxD = 2;
 		depth = 1;
 		nIslands = 1 + Map.Rand(2, "NoWrap Back Islands");
 		if isFrosty then
-			minD = 2;
-			maxD = 3;
-			depth = 2;
+			-- Widened from the original 2-3 clamp (which, against a
+			-- 3-column backMax, meant depth could only ever mean "2 of 3
+			-- columns wet" or "all 3 wet" -- almost no visible variation at
+			-- all) to 1-5 against the new 6-column backMax: real row-to-row
+			-- noise in the coastline's shape, plus more horizontal reach,
+			-- while keeping the same starting depth so the average (and so
+			-- roughly the total water area) only grows modestly rather than
+			-- ballooning into Peaky-blob territory.
+			minD = 1;
+			maxD = 5;
+			depth = 3;
 		elseif isPeaks then
 			minD = 3;
 			maxD = 7;
@@ -6920,15 +6943,24 @@ function GenerateTerrain()
 		-- radiating value for Frosty instead of the usual vertical band, so
 		-- vanilla's own snow/tundra/plains/grass banding does the real
 		-- work: Snow right at the cold corner, Tundra further out, Plains
-		-- in the middle band, Grass once far enough from the corner. No
-		-- Desert -- not a fit for this climate.
-		args.fSnowLatitude = 0.72;
-		args.fTundraLatitude = 0.48;
-		args.iDesertPercent = 0;
+		-- in the middle band, Grass once far enough from the corner.
+		--
+		-- Snow band widened (0.72 -> 0.60 threshold, i.e. the corner's polar
+		-- cap now reaches roughly 40% of the way to the far corner instead
+		-- of 28%) and the rest compressed proportionally to still each get a
+		-- real band rather than being squeezed out.
+		--
+		-- A modest Desert band added near the warm far corner (previously
+		-- fully disabled) -- see AddFeatures' frosty branch for how it's
+		-- meant to interleave with the Jungle band there for a believable
+		-- warm-corner mix instead of a clean either/or split.
+		args.fSnowLatitude = 0.60;
+		args.fTundraLatitude = 0.38;
+		args.iDesertPercent = 35;
 		args.iPlainsPercent = 45;
-		args.fGrassLatitude = 0.22;
-		args.fDesertBottomLatitude = 1.1;
-		args.fDesertTopLatitude = 1.1;
+		args.fGrassLatitude = 0.18;
+		args.fDesertBottomLatitude = 0.02;
+		args.fDesertTopLatitude = 0.22;
 	elseif cfg ~= nil and (cfg.kind == "tongue" or cfg.kind == "bramble") then
 		args.fSnowLatitude = 1.1;
 		args.fTundraLatitude = 1.1;
@@ -9818,15 +9850,30 @@ function AddFeatures()
 		args.fMarshPercent = 0;
 		args.iOasisPercent = 0;
 	elseif cfg ~= nil and cfg.kind == "frosty" then
-		-- A modest patch of jungle right at the far (warmest) corner from
-		-- the cold impulse -- the same "1/iJungleFactor of lat" gate other
-		-- climates use to widen/narrow their jungle band works identically
-		-- here, it's just gating on distance-from-corner instead of
-		-- distance-from-equator (see GetClimateLatitudeAtPlot's frosty
-		-- branch). A small deliberate realistic-transition flourish per the
-		-- user's request, not a defining feature of the climate.
-		args.iJunglePercent = 25;
-		args.iJungleFactor = 4;
+		-- Jungle at the far (warmest) corner from the cold impulse -- the
+		-- same "1/iJungleFactor of lat" gate other climates use to widen/
+		-- narrow their jungle band works identically here, it's just gating
+		-- on distance-from-corner instead of distance-from-equator (see
+		-- GetClimateLatitudeAtPlot's frosty branch). Widened from 25%/
+		-- factor 4 (lat < 0.25) to 30%/factor 3 (lat < 0.333) to claim more
+		-- of the warm corner, at the user's request.
+		--
+		-- Realism note: real biogeography puts arid/desert bands further
+		-- from the equator than the tropics/jungle band, not nested inside
+		-- it -- but Jungle here is a FEATURE gated purely on lat, while
+		-- Desert (GenerateTerrain's frosty branch, fDesertBottomLatitude
+		-- 0.02 - fDesertTopLatitude 0.22) is a TERRAIN type decided earlier
+		-- and Jungle can't grow on Desert terrain, so the two bands are
+		-- deliberately overlapped instead of concentric: a thin pure-Jungle
+		-- tip right at the corner (lat 0-0.02), a mixed belt where each
+		-- Desert-terrain roll pre-empts what would otherwise be Jungle-
+		-- topped Plains/Grass (lat 0.02-0.22), then pure Jungle-on-Plains
+		-- continuing out to lat 0.333. Reads as a believable, naturally
+		-- interspersed warm/dry transition zone rather than a clean ring
+		-- either way, and is easy to push further apart later if the mix
+		-- reads as too jumbled in practice.
+		args.iJunglePercent = 30;
+		args.iJungleFactor = 3;
 		args.iForestPercent = 40;
 		args.fMarshPercent = 0;
 		args.iOasisPercent = 0;
@@ -16445,11 +16492,9 @@ function ForestMountainsToBareTarget()
 	if tilted == false then
 		staticSkip = FillMireSkip(iW);
 	end
-	local bareWant = BARE_MOUNTAIN_TARGET;
-	if bareWant < 1 then
-		bareWant = 1;
-	end
-	local mtns = {};
+	-- Precompute each row's skip mask once -- needed twice below, for the
+	-- largest-landmass flood-fill and for gathering mountain candidates.
+	local skipByRow = {};
 	local y = 0;
 	while y < iH do
 		local skip = staticSkip;
@@ -16468,13 +16513,98 @@ function ForestMountainsToBareTarget()
 				ci = ci + 1;
 			end
 		end
+		skipByRow[y] = skip;
+		y = y + 1;
+	end
+	local function eligiblePlot(px, py)
+		local skip = skipByRow[py];
+		if skip ~= nil and skip[px] == true then
+			return nil
+		end
+		if MirrorOwnsPlot(px, py, mirrored, iW) == false then
+			return nil
+		end
+		return Map.GetPlot(px, py);
+	end
+	-- Mountains sitting on a separate, disconnected landmass (this map's
+	-- back-coast islands, mainly) shouldn't compete for forest/jungle
+	-- against the real interior peaks at all -- a "splintered cliff"
+	-- growing a full mountain forest reads as wrong regardless of how the
+	-- bare/forested split lands. Flood-fill every non-water tile in the
+	-- same eligible zone to find the largest connected landmass; only that
+	-- landmass's mountains are candidates below, everything else is left
+	-- exactly as it already is (bare, in practice, since nothing else
+	-- forests a mountain outside the dedicated inland-massif systems).
+	local visited = {};
+	local bestSize = 0;
+	local bestComp = nil;
+	y = 0;
+	while y < iH do
 		local x = 0;
 		while x < iW do
-			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
-				local plot = Map.GetPlot(x, y);
-				if plot ~= nil and plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN and PlotHasNaturalWonder(plot) ~= true then
-					table.insert(mtns, plot);
+			local key = y * iW + x;
+			if visited[key] ~= true then
+				local plot = eligiblePlot(x, y);
+				if plot ~= nil and plot:IsWater() == false then
+					local comp = {};
+					local qx, qy = {x}, {y};
+					visited[key] = true;
+					local qi = 1;
+					while qi <= #qx do
+						local cx, cy = qx[qi], qy[qi];
+						qi = qi + 1;
+						table.insert(comp, cy * iW + cx);
+						local d = 0;
+						while d < DirectionTypes.NUM_DIRECTION_TYPES do
+							local adj = PlotDirNoXWrap(cx, cy, d);
+							if adj ~= nil then
+								local ax, ay = adj:GetX(), adj:GetY();
+								local ak = ay * iW + ax;
+								if visited[ak] ~= true then
+									local aplot = eligiblePlot(ax, ay);
+									if aplot ~= nil and aplot:IsWater() == false then
+										visited[ak] = true;
+										table.insert(qx, ax);
+										table.insert(qy, ay);
+									end
+								end
+							end
+							d = d + 1;
+						end
+					end
+					if #comp > bestSize then
+						bestSize = #comp;
+						bestComp = comp;
+					end
+				else
+					visited[key] = true;
 				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	local isMainland = {};
+	if bestComp ~= nil then
+		local i = 1;
+		while i <= #bestComp do
+			isMainland[bestComp[i]] = true;
+			i = i + 1;
+		end
+	end
+	local bareWant = BARE_MOUNTAIN_TARGET;
+	if bareWant < 1 then
+		bareWant = 1;
+	end
+	local mtns = {};
+	y = 0;
+	while y < iH do
+		local x = 0;
+		while x < iW do
+			local plot = eligiblePlot(x, y);
+			if plot ~= nil and plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN and PlotHasNaturalWonder(plot) ~= true
+				and isMainland[y * iW + x] == true then
+				table.insert(mtns, plot);
 			end
 			x = x + 1;
 		end
