@@ -510,6 +510,26 @@ function IsOasisClimate()
 	return cfg ~= nil and cfg.kind == "desert";
 end
 ------------------------------------------------------------------------------
+-- Desert (Oasis), Peaks and Wetland all pin fSnowLatitude/fTundraLatitude
+-- past 1.0 in GenerateTerrain, disabling vanilla's own latitude-based
+-- Tundra/Snow entirely -- their interior is never meant to have any (Oasis
+-- has none at all; Peaks and Wetland are grass/plains/mountain climates
+-- with none either). EnsureRegionalLuxuryTarget's terraform-rescue tier
+-- (tryTerraformOnPlot) doesn't know that -- left unchecked, it will happily
+-- carve Tundra/Snow into their interior land anyway to legalize an
+-- otherwise-unplaceable regional luxury (e.g. Fur assigned, however rarely,
+-- to a region that structurally has no eligible terrain for it at all).
+-- Frosty/Standard/Tongue/Bramble/Wasteland are exempt: they're snow/tundra
+-- climates themselves, or use Tundra deliberately elsewhere (barrier
+-- terrain/transition), so forcing it into their interior isn't a violation.
+function ClimateAllowsInteriorPolarTerrain()
+	local cfg = GetBarrierConfig();
+	if cfg == nil then
+		return true
+	end
+	return cfg.kind ~= "desert" and cfg.kind ~= "peaks" and cfg.kind ~= "wetland";
+end
+------------------------------------------------------------------------------
 function OasisNonDesertLandAdj(x, y)
 	local n = 0;
 	local d = 0;
@@ -8888,7 +8908,7 @@ function EnsureRegionalLuxuryTarget(asp)
 				local t = terrains[ti];
 				if t ~= oldTerrain then
 					local isPolar = (t == TerrainTypes.TERRAIN_TUNDRA or t == TerrainTypes.TERRAIN_SNOW);
-					if (isPolar == false) or plotLatitude(plot:GetY()) > 0.5 then
+					if (isPolar == false) or (plotLatitude(plot:GetY()) > 0.5 and ClimateAllowsInteriorPolarTerrain()) then
 						plot:SetTerrainType(t, false, false);
 						if plot:CanHaveResource(resID) then
 							return true
@@ -9319,6 +9339,49 @@ function EnsureFurOnTundraHasForest()
 		y = y + 1;
 	end
 	WeeveeDbg("Fur-on-tundra forced forest: " .. n);
+end
+------------------------------------------------------------------------------
+-- Jade sitting on flat Desert reads oddly next to the rest of Oasis's
+-- terrain-appropriate resources -- give it a real chance to become a
+-- Desert Hill instead, mirroring WastelandMiningLuxFlatTundraToHill's
+-- pattern but scoped to just this one resource, at the user's requested
+-- 70% rate. Runs at the very end of the resource pipeline (alongside
+-- EnsureFurOnTundraHasForest) so it catches Jade regardless of which pass
+-- actually placed it -- vanilla's own placement, EnsureRegionalLuxuryTarget's
+-- forcing, or EnsureLuxuryQuota's padding.
+function OasisJadeFlatDesertToHill()
+	local cfg = GetBarrierConfig();
+	if cfg == nil or cfg.kind ~= "desert" then
+		return
+	end
+	local jadeID = GameInfoTypes["RESOURCE_JADE"];
+	if jadeID == nil then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local mirrored = (DEF_MIRRORED == 1);
+	local raised = 0;
+	local y = 0;
+	while y < iH do
+		local x = 0;
+		while x < iW do
+			if MirrorOwnsPlot(x, y, mirrored, iW) then
+				local plot = Map.GetPlot(x, y);
+				if plot ~= nil
+					and plot:GetPlotType() == PlotTypes.PLOT_LAND
+					and plot:GetTerrainType() == TerrainTypes.TERRAIN_DESERT
+					and plot:GetResourceType(-1) == jadeID then
+					if Map.Rand(100, "Oasis Jade flat to hill") < 70 then
+						plot:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
+						raised = raised + 1;
+					end
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	WeeveeDbg("Oasis Jade flat desert to hill: " .. raised);
 end
 ------------------------------------------------------------------------------
 function AddWetlandRiverDesert()
@@ -18781,6 +18844,7 @@ function StartPlotSystem()
 	WeeveeDbgCall("EnsureLuxuryQuota-postRegionalForce", EnsureLuxuryQuota);
 	WeeveeDbgCall("TrimLuxuryQuotaExcess", function() TrimLuxuryQuotaExcess(start_plot_database) end);
 	WeeveeDbgCall("EnsureFurOnTundraHasForest", EnsureFurOnTundraHasForest);
+	WeeveeDbgCall("OasisJadeFlatDesertToHill", OasisJadeFlatDesertToHill);
 	WeeveeDbgCall("LogRegionalLuxuryCounts-preMirror", function() LogRegionalLuxuryCounts(start_plot_database, "pre-mirror-final") end);
 	WeeveeDbg("before mirror");
 	if DEF_MIRRORED == 1 then
