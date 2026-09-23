@@ -146,6 +146,12 @@ local SPLIT_TONGUE = 8;
 local SPLIT_BRAMBLE = 9;
 local SPLIT_RANDOM = 10;
 local BARE_MOUNTAIN_TARGET = 20;
+-- Shared between AddFrostyPolarMountainRidge (which grows the ridge within
+-- this radius of the polar corner) and ForestMountainsToBareTarget (which
+-- excludes any mountain this close to the corner from its bare/forest
+-- count and selection entirely) -- kept as one constant so the two always
+-- agree on what counts as "close to the polar center".
+local FROSTY_POLAR_RIDGE_RADIUS = 7;
 local SPLIT_MENU_RANDOM = 1; -- Random's dropdown position
 local WRAP_NO = 1;
 local WRAP_YES = 2;
@@ -4298,24 +4304,29 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 	-- GenerateTerrain) would otherwise wipe anything placed at the
 	-- plotTypes-array stage right back to flat land.
 	local isPeaks = frostyCfg ~= nil and frostyCfg.kind == "peaks";
-	local backMax = isPeaks and 8 or (isFrosty and 5 or 2);
+	local backMax = isPeaks and 8 or (isFrosty and 7 or 2);
+	-- Per-row random-walk step size: how much depth can jump row to row, not
+	-- just the clamp range it wanders within. Frosty widens this too (see
+	-- below) since a wide min/maxD clamp alone still reads fairly smooth if
+	-- each row can only nudge by 1 from the last.
+	local stepRange = 3;
 	if UsesExploCoastShape() then
 		minD = 1;
 		maxD = 2;
 		depth = 1;
 		nIslands = 1 + Map.Rand(2, "NoWrap Back Islands");
 		if isFrosty then
-			-- Widened from the original 2-3 clamp (which, against a
-			-- 3-column backMax, meant depth could only ever mean "2 of 3
-			-- columns wet" or "all 3 wet" -- almost no visible variation at
-			-- all) to 1-5 against the new 6-column backMax: real row-to-row
-			-- noise in the coastline's shape, plus more horizontal reach,
-			-- while keeping the same starting depth so the average (and so
-			-- roughly the total water area) only grows modestly rather than
-			-- ballooning into Peaky-blob territory.
-			minD = 1;
-			maxD = 5;
+			-- Widened again (was 1-5 against a 6-column backMax) to 0-6
+			-- against 8 columns, and the per-row step widened from +/-1 to
+			-- +/-2 -- the original 2-3 clamp, against a 3-column backMax,
+			-- meant depth could only ever mean "2 of 3 columns wet" or "all
+			-- 3 wet", almost no visible variation at all; this reads as a
+			-- properly ragged, occasionally near-dry-to-near-full coastline
+			-- from row to row instead.
+			minD = 0;
+			maxD = 6;
 			depth = 3;
+			stepRange = 5;
 		elseif isPeaks then
 			minD = 3;
 			maxD = 7;
@@ -4325,7 +4336,7 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 	end
 	local y = 0;
 	while y < iH do
-		local step = Map.Rand(3, "NoWrap Coast Walk") - 1;
+		local step = Map.Rand(stepRange, "NoWrap Coast Walk") - math.floor(stepRange / 2);
 		depth = depth + step;
 		if depth < minD then
 			depth = minD;
@@ -6989,6 +7000,8 @@ function GenerateTerrain()
 	AddMireBands();
 	AddPeaksLayout();
 	AddBrambleLayout();
+	AddFrostyPolarMountainRidge();
+	AddFrostySnowFingers();
 	WeeveeDbg("GenerateTerrain done");
 end
 ------------------------------------------------------------------------------
@@ -7006,12 +7019,14 @@ end
 ------------------------------------------------------------------------------
 function FeatureGenerator:AddJunglesAtPlot(plot, iX, iY, lat)
 	local cfg = GetBarrierConfig();
-	-- Frosty deliberately left OUT of this exemption list, unlike its
-	-- siblings here -- its redesign wants vanilla's own generic jungle
-	-- placement (iJunglePercent/iJungleFactor, set in AddFeatures) to
-	-- produce its small warm-corner jungle accent, rather than a bespoke
-	-- placement pass.
-	if cfg ~= nil and (cfg.kind == "wetland" or cfg.kind == "peaks" or cfg.kind == "tongue" or cfg.kind == "bramble") then
+	-- Frosty moved INTO this exemption list -- its first pass relied on
+	-- vanilla's own generic jungle placement, but the eligible band here is
+	-- a narrow curved sliver near one corner rather than vanilla's usual
+	-- wide equatorial band, and it read as sparse/frayed rather than a real
+	-- jungle mass. AddFrostyJungleFingers (a deliberate core-plus-radiating-
+	-- fingers pass, mirroring AddFrostySnowFingers) is now the only source
+	-- of Jungle on this climate.
+	if cfg ~= nil and (cfg.kind == "wetland" or cfg.kind == "peaks" or cfg.kind == "tongue" or cfg.kind == "bramble" or cfg.kind == "frosty") then
 		return
 	end
 	local jungle_height = self.jungles:GetHeight(iX, iY);
@@ -9908,30 +9923,12 @@ function AddFeatures()
 		args.fMarshPercent = 0;
 		args.iOasisPercent = 0;
 	elseif cfg ~= nil and cfg.kind == "frosty" then
-		-- Jungle at the far (warmest) corner from the cold impulse -- the
-		-- same "1/iJungleFactor of lat" gate other climates use to widen/
-		-- narrow their jungle band works identically here, it's just gating
-		-- on distance-from-corner instead of distance-from-equator (see
-		-- GetClimateLatitudeAtPlot's frosty branch). Widened from 25%/
-		-- factor 4 (lat < 0.25) to 30%/factor 3 (lat < 0.333) to claim more
-		-- of the warm corner, at the user's request.
-		--
-		-- Realism note: real biogeography puts arid/desert bands further
-		-- from the equator than the tropics/jungle band, not nested inside
-		-- it -- but Jungle here is a FEATURE gated purely on lat, while
-		-- Desert (GenerateTerrain's frosty branch, fDesertBottomLatitude
-		-- 0.02 - fDesertTopLatitude 0.22) is a TERRAIN type decided earlier
-		-- and Jungle can't grow on Desert terrain, so the two bands are
-		-- deliberately overlapped instead of concentric: a thin pure-Jungle
-		-- tip right at the corner (lat 0-0.02), a mixed belt where each
-		-- Desert-terrain roll pre-empts what would otherwise be Jungle-
-		-- topped Plains/Grass (lat 0.02-0.22), then pure Jungle-on-Plains
-		-- continuing out to lat 0.333. Reads as a believable, naturally
-		-- interspersed warm/dry transition zone rather than a clean ring
-		-- either way, and is easy to push further apart later if the mix
-		-- reads as too jumbled in practice.
-		args.iJunglePercent = 30;
-		args.iJungleFactor = 3;
+		-- Jungle no longer comes from vanilla's own lat-gated placement at
+		-- all (see FeatureGenerator:AddJunglesAtPlot's exemption list and
+		-- AddFrostyJungleFingers) -- these two are moot now, zeroed the same
+		-- way every other exempted climate here does.
+		args.iJunglePercent = 0;
+		args.iJungleFactor = 5;
 		args.iForestPercent = 40;
 		args.fMarshPercent = 0;
 		args.iOasisPercent = 0;
@@ -9976,7 +9973,7 @@ function AddFeatures()
 	AddPeaksEconHillFill();
 	AddPeaksRandomForestSpray();
 	AddFrostyCornerIce();
-	AddFrostyJungleCluster();
+	AddFrostyJungleFingers();
 	AddBrambleFeatures();
 	ForestMountainsToBareTarget();
 	WeeveeLogFlatHillSample();
@@ -13079,43 +13076,40 @@ function AddFrostyCornerIce()
 	print("Frosty corner ice:", n);
 end
 ------------------------------------------------------------------------------
--- Vanilla's own lat-gated, fractal-driven Jungle placement (AddFeatures'
--- frosty args) reads as sparse and frayed here: the eligible band is a
--- narrow curved sliver near one corner, nothing like vanilla's usual wide
--- equatorial band where the fractal's natural blobbiness has room to show,
--- and the Desert band sharing that same space (see GenerateTerrain's
--- frosty branch) pre-empts some of what would've been Jungle-topped
--- Plains before this even runs. Forces a couple of solid, deliberately-
--- clustered patches within Jungle's uncontested pure core (lat < 0.15,
--- Desert-free) instead of trusting the fractal alone -- the same "just
--- grow a real blob" approach already used for Peaky's own inland forests
--- (PeakGrowForest) rather than a scattered feel. Runs after vanilla's own
--- AddFeatures/AdjustTerrainTypes, so it explicitly matches vanilla's own
--- "Jungle sits on Plains" terrain convention itself.
-function AddFrostyJungleCluster()
+-- A real chance (not guaranteed every roll) of a significant mountain
+-- ridge close to the polar corner, for visual weight at the coldest point
+-- -- grown the same organic, direction-biased way as Peaky's own mountain
+-- blobs (PeakGrowFromSeed), just anchored near (0, iH-1) instead of a
+-- region-wide random seed. Runs inside GenerateTerrain (alongside
+-- AddPeaksLayout/AddBrambleLayout), before AddFeatures, so it's just
+-- ordinary committed terrain by the time anything else looks at it.
+function AddFrostyPolarMountainRidge()
 	local cfg = GetBarrierConfig();
 	if cfg == nil or cfg.kind ~= "frosty" then
 		return
 	end
+	if Map.Rand(100, "Frosty Polar Ridge Chance") >= 60 then
+		print("Frosty polar mountain ridge: skipped this roll");
+		return
+	end
 	local iW, iH = Map.GetGridSize();
 	local mirrored = (DEF_MIRRORED == 1);
-	local function eligible(plot)
-		return plot ~= nil
-			and plot:IsWater() == false
-			and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
-			and plot:GetFeatureType() == FeatureTypes.NO_FEATURE
-			and plot:CanHaveFeature(FeatureTypes.FEATURE_JUNGLE)
-			and GetClimateLatitudeAtPlot(plot:GetX(), plot:GetY()) < 0.15;
-	end
+	local skip = FillMireSkip(iW);
+	local cx, cy = 0, iH - 1;
+	local radius = FROSTY_POLAR_RIDGE_RADIUS;
 	local candidates = {};
-	local y = 0;
-	while y < iH do
+	local y = math.max(0, cy - radius);
+	while y <= cy do
 		local x = 0;
-		while x < iW do
-			if MirrorOwnsPlot(x, y, mirrored, iW) then
-				local plot = Map.GetPlot(x, y);
-				if eligible(plot) then
-					table.insert(candidates, plot);
+		while x <= radius do
+			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
+				local d = Map.PlotDistance(cx, cy, x, y);
+				if d >= 2 and d <= radius then
+					local plot = Map.GetPlot(x, y);
+					if plot ~= nil and plot:IsWater() == false and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
+						and PlotIsMajorStart(plot) == false then
+						table.insert(candidates, plot);
+					end
 				end
 			end
 			x = x + 1;
@@ -13123,11 +13117,158 @@ function AddFrostyJungleCluster()
 		y = y + 1;
 	end
 	if #candidates < 1 then
-		print("Frosty jungle clusters: 0 (no eligible core tiles)");
+		print("Frosty polar mountain ridge: no candidates");
 		return
 	end
 	candidates = GetShuffledCopyOfTable(candidates);
-	local nClusters = 2 + Map.Rand(2, "Frosty Jungle Cluster Count");
+	local seed = candidates[1];
+	local target = 7 + Map.Rand(6, "Frosty Polar Ridge Size");
+	local q = {seed};
+	seed:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
+	seed:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+	local qi = 1;
+	while qi <= #q and #q < target do
+		local p = q[qi];
+		qi = qi + 1;
+		local d0 = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Frosty Polar Ridge Dir");
+		local k = 0;
+		while k < DirectionTypes.NUM_DIRECTION_TYPES and #q < target do
+			local d = (d0 + k) % DirectionTypes.NUM_DIRECTION_TYPES;
+			k = k + 1;
+			local adj = PlotDirNoXWrap(p:GetX(), p:GetY(), d);
+			if adj ~= nil and skip[adj:GetX()] ~= true and adj:IsWater() == false
+				and adj:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN and PlotIsMajorStart(adj) == false
+				and Map.PlotDistance(cx, cy, adj:GetX(), adj:GetY()) <= radius
+				and Map.Rand(100, "Frosty Polar Ridge Grow") < 72 then
+				adj:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
+				adj:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+				table.insert(q, adj);
+			end
+		end
+	end
+	print("Frosty polar mountain ridge:", #q, "tiles");
+end
+------------------------------------------------------------------------------
+-- Snow reaching into Tundra as thin, meandering, tapering fingers instead
+-- of a clean latitude-band arc -- same shape as Peaky's own starfish hill
+-- fingers (AddPeaksLayout's growFinger): grow from every Snow tile that
+-- already borders Tundra, meander via a chance each step to veer one
+-- hex-turn left or right, taper off increasingly with distance so each
+-- finger ends in a point. Runs after vanilla's own terrain generation has
+-- committed the smooth Snow/Tundra bands, carving into them rather than
+-- replacing them.
+function AddFrostySnowFingers()
+	local cfg = GetBarrierConfig();
+	if cfg == nil or cfg.kind ~= "frosty" then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local mirrored = (DEF_MIRRORED == 1);
+	local skip = FillMireSkip(iW);
+	local function fingerEligible(x, y)
+		if x == nil or y == nil or skip[x] == true then
+			return false
+		end
+		if mirrored and x > iW * 0.5 then
+			return false
+		end
+		local plot = Map.GetPlot(x, y);
+		return plot ~= nil and plot:IsWater() == false and plot:GetTerrainType() == TerrainTypes.TERRAIN_TUNDRA;
+	end
+	local edges = {};
+	local y = 0;
+	while y < iH do
+		local x = 0;
+		while x < iW do
+			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
+				local plot = Map.GetPlot(x, y);
+				if plot ~= nil and plot:IsWater() == false and plot:GetTerrainType() == TerrainTypes.TERRAIN_SNOW then
+					local d = 0;
+					while d < DirectionTypes.NUM_DIRECTION_TYPES do
+						local adj = PlotDirNoXWrap(x, y, d);
+						if adj ~= nil and adj:GetTerrainType() == TerrainTypes.TERRAIN_TUNDRA then
+							table.insert(edges, plot);
+							break
+						end
+						d = d + 1;
+					end
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	if #edges < 1 then
+		print("Frosty snow fingers: no Snow/Tundra edge found");
+		return
+	end
+	edges = GetShuffledCopyOfTable(edges);
+	local nFingers = math.min(#edges, 5 + Map.Rand(4, "Frosty Snow Finger Count"));
+	local nSet = 0;
+	local fi = 1;
+	while fi <= nFingers do
+		local origin = edges[fi];
+		fi = fi + 1;
+		local cx, cy = origin:GetX(), origin:GetY();
+		local dir = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Frosty Snow Finger Dir");
+		local len = 3 + Map.Rand(5, "Frosty Snow Finger Length");
+		local step = 0;
+		while step < len do
+			if Map.Rand(100, "Frosty Snow Finger Meander") < 55 then
+				local turn = 1;
+				if Map.Rand(2, "Frosty Snow Finger Turn") == 0 then
+					turn = -1;
+				end
+				dir = (dir + turn) % DirectionTypes.NUM_DIRECTION_TYPES;
+			end
+			local adj = PlotDirNoXWrap(cx, cy, dir);
+			if adj == nil then
+				break
+			end
+			cx, cy = adj:GetX(), adj:GetY();
+			if fingerEligible(cx, cy) == false then
+				break
+			end
+			adj:SetTerrainType(TerrainTypes.TERRAIN_SNOW, false, false);
+			nSet = nSet + 1;
+			step = step + 1;
+			if step >= 2 and Map.Rand(100, "Frosty Snow Finger Taper") < (8 + step * 5) then
+				break
+			end
+		end
+	end
+	print("Frosty snow fingers:", nFingers, " tiles:", nSet);
+end
+------------------------------------------------------------------------------
+-- Mirrors AddFrostySnowFingers' own shape, just for Jungle instead of Snow,
+-- anchored at the opposite end of the same diagonal: a solid core planted
+-- at the bottom-right cell of the econ zone (the far corner from the cold
+-- impulse, (mid, 0) -- the same point GetClimateLatitudeAtPlot already
+-- treats as "warmest"), then thin meandering fingers radiating outward
+-- from that core that taper off with distance, same meander/taper shape as
+-- the snow fingers. Replaces an earlier version that scattered a couple of
+-- independent blobs across a whole latitude-defined "core zone" -- still
+-- read as sparse/frayed, since nothing tied the pieces together into one
+-- real jungle mass with a recognizable center. Frosty is fully exempted
+-- from vanilla's own lat-gated jungle placement (FeatureGenerator:
+-- AddJunglesAtPlot) now, so this is the only source of Jungle on this
+-- climate. Runs after vanilla's own AddFeatures/AdjustTerrainTypes, so it
+-- explicitly matches vanilla's own "Jungle sits on Plains" convention.
+function AddFrostyJungleFingers()
+	local cfg = GetBarrierConfig();
+	if cfg == nil or cfg.kind ~= "frosty" then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local mirrored = (DEF_MIRRORED == 1);
+	local skip = FillMireSkip(iW);
+	local function eligible(plot)
+		return plot ~= nil
+			and plot:IsWater() == false
+			and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
+			and plot:GetFeatureType() == FeatureTypes.NO_FEATURE
+			and plot:CanHaveFeature(FeatureTypes.FEATURE_JUNGLE);
+	end
 	local claimed = {};
 	local function claim(plot)
 		claimed[plot:GetY() * iW + plot:GetX()] = true;
@@ -13140,36 +13281,79 @@ function AddFrostyJungleCluster()
 		plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, true);
 		claim(plot);
 	end
-	local nSet = 0;
-	local placed = 0;
-	local ci = 1;
-	while placed < nClusters and ci <= #candidates do
-		local seed = candidates[ci];
-		ci = ci + 1;
-		if isClaimed(seed) == false and seed:GetFeatureType() == FeatureTypes.NO_FEATURE then
-			local target = 5 + Map.Rand(5, "Frosty Jungle Cluster Size");
-			local q = {seed};
-			plantJungle(seed);
-			nSet = nSet + 1;
-			local qi = 1;
-			while qi <= #q and #q < target do
-				local p = q[qi];
-				qi = qi + 1;
-				local d = 0;
-				while d < DirectionTypes.NUM_DIRECTION_TYPES and #q < target do
-					local adj = PlotDirNoXWrap(p:GetX(), p:GetY(), d);
-					if adj ~= nil and isClaimed(adj) == false and eligible(adj) and Map.Rand(100, "Frosty Jungle Cluster Grow") < 75 then
-						plantJungle(adj);
-						table.insert(q, adj);
-						nSet = nSet + 1;
-					end
-					d = d + 1;
+	local mid = math.floor(iW / 2);
+	local anchor = nil;
+	local ry = 0;
+	while ry <= 4 and anchor == nil do
+		local rx = 0;
+		while rx <= 4 and anchor == nil do
+			local tx, ty = mid - 3 - rx, 1 + ry;
+			if tx >= 0 and skip[tx] ~= true and MirrorOwnsPlot(tx, ty, mirrored, iW) then
+				local plot = Map.GetPlot(tx, ty);
+				if eligible(plot) then
+					anchor = plot;
 				end
 			end
-			placed = placed + 1;
+			rx = rx + 1;
+		end
+		ry = ry + 1;
+	end
+	if anchor == nil then
+		print("Frosty jungle fingers: no anchor found");
+		return
+	end
+	local core = {anchor};
+	plantJungle(anchor);
+	local coreTarget = 8 + Map.Rand(6, "Frosty Jungle Core Size");
+	local qi = 1;
+	while qi <= #core and #core < coreTarget do
+		local p = core[qi];
+		qi = qi + 1;
+		local d0 = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Frosty Jungle Core Grow Dir");
+		local k = 0;
+		while k < DirectionTypes.NUM_DIRECTION_TYPES and #core < coreTarget do
+			local d = (d0 + k) % DirectionTypes.NUM_DIRECTION_TYPES;
+			k = k + 1;
+			local adj = PlotDirNoXWrap(p:GetX(), p:GetY(), d);
+			if adj ~= nil and isClaimed(adj) == false and eligible(adj) and Map.Rand(100, "Frosty Jungle Core Grow") < 70 then
+				plantJungle(adj);
+				table.insert(core, adj);
+			end
 		end
 	end
-	print("Frosty jungle clusters:", placed, " tiles:", nSet);
+	local nFingers = 4 + Map.Rand(3, "Frosty Jungle Finger Count");
+	local f = 1;
+	while f <= nFingers do
+		local origin = core[1 + Map.Rand(#core, "Frosty Jungle Finger Origin")];
+		local cx, cy = origin:GetX(), origin:GetY();
+		local dir = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Frosty Jungle Finger Dir");
+		local len = 3 + Map.Rand(5, "Frosty Jungle Finger Length");
+		local step = 0;
+		while step < len do
+			if Map.Rand(100, "Frosty Jungle Finger Meander") < 55 then
+				local turn = 1;
+				if Map.Rand(2, "Frosty Jungle Finger Turn") == 0 then
+					turn = -1;
+				end
+				dir = (dir + turn) % DirectionTypes.NUM_DIRECTION_TYPES;
+			end
+			local adj = PlotDirNoXWrap(cx, cy, dir);
+			if adj == nil then
+				break
+			end
+			cx, cy = adj:GetX(), adj:GetY();
+			if isClaimed(adj) or eligible(adj) == false then
+				break
+			end
+			plantJungle(adj);
+			step = step + 1;
+			if step >= 2 and Map.Rand(100, "Frosty Jungle Finger Taper") < (8 + step * 5) then
+				break
+			end
+		end
+		f = f + 1;
+	end
+	print("Frosty jungle fingers: core=", #core, " fingers=", nFingers);
 end
 ------------------------------------------------------------------------------
 function CountMireMountainNeighbors(plot)
@@ -16748,6 +16932,13 @@ function ForestMountainsToBareTarget()
 	if bareWant < 1 then
 		bareWant = 1;
 	end
+	-- Frosty's own polar mountain ridge (AddFrostyPolarMountainRidge) is
+	-- meant to stay a rugged, permanently bare icy range regardless of how
+	-- the rest of the map's bare/forest split lands -- excluded from the
+	-- count entirely rather than just being unlikely to get picked.
+	local frostyCfg = GetBarrierConfig();
+	local excludePolarRidge = frostyCfg ~= nil and frostyCfg.kind == "frosty";
+	local polarCx, polarCy = 0, iH - 1;
 	local mtns = {};
 	y = 0;
 	while y < iH do
@@ -16755,7 +16946,8 @@ function ForestMountainsToBareTarget()
 		while x < iW do
 			local plot = eligiblePlot(x, y);
 			if plot ~= nil and plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN and PlotHasNaturalWonder(plot) ~= true
-				and isMainland[y * iW + x] == true then
+				and isMainland[y * iW + x] == true
+				and (excludePolarRidge == false or Map.PlotDistance(polarCx, polarCy, x, y) > FROSTY_POLAR_RIDGE_RADIUS) then
 				table.insert(mtns, plot);
 			end
 			x = x + 1;
