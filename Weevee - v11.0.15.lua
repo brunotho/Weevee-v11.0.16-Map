@@ -6970,10 +6970,11 @@ function GenerateTerrain()
 		-- of 28%) and the rest compressed proportionally to still each get a
 		-- real band rather than being squeezed out.
 		--
-		-- Tundra band cut by roughly 30% (0.60-0.38=0.22 wide -> 0.60-0.45=
-		-- 0.15 wide) per the user's request, at the request's own explicit
-		-- boundary (fSnowLatitude unchanged) -- the freed-up space goes to
-		-- Plains, which grows from 0.20 to 0.27 wide.
+		-- Tundra band cut by roughly 30% then another 20% on top (0.22 wide
+		-- -> 0.15 -> 0.12, i.e. fTundraLatitude 0.38 -> 0.45 -> 0.48), at the
+		-- request's own explicit boundary (fSnowLatitude unchanged) --
+		-- freed-up space keeps going to Plains, now 0.30 wide (was 0.27,
+		-- 0.20 originally).
 		--
 		-- A modest Desert band added near the warm far corner (previously
 		-- fully disabled), shifted outward from its first pass (was 0.02-
@@ -6984,14 +6985,14 @@ function GenerateTerrain()
 		-- rather than a real jungle mass. Desert and Jungle still overlap
 		-- from 0.15-0.30 for a believable mixed warm/dry transition, same
 		-- reasoning as before, just pushed past Jungle's new solid core.
-		-- Desert cut by roughly 30% (35 -> 25) per the user's request -- it
-		-- was reading as too much of the warm corner. AddFrostyDesertHills
-		-- (GenerateTerrain, after this) tops up whatever Desert does spawn
-		-- with a fair share of Hills, since it was showing up suspiciously
-		-- flat in practice.
+		-- Desert's own density cut by roughly 30% then another 20% on top
+		-- (35 -> 25 -> 20) -- it was reading as too much of the warm
+		-- corner both times. AddFrostyDesertHills (GenerateTerrain, after
+		-- this) tops up whatever Desert does spawn with a fair share of
+		-- Hills, since it was showing up suspiciously flat in practice.
 		args.fSnowLatitude = 0.60;
-		args.fTundraLatitude = 0.45;
-		args.iDesertPercent = 25;
+		args.fTundraLatitude = 0.48;
+		args.iDesertPercent = 20;
 		args.iPlainsPercent = 45;
 		args.fGrassLatitude = 0.18;
 		args.fDesertBottomLatitude = 0.15;
@@ -9751,13 +9752,13 @@ function StripLuxuryOnTinyPeaksIslands()
 end
 ------------------------------------------------------------------------------
 -- No luxury should sit somewhere bordering fewer than 2 tiles that are
--- both non-Snow and non-water -- the goal is to exclude the harshest
--- (worst in gameplay terms) spots from eligibility. Judged from the final
--- committed terrain, not from any particular placement pass, so it
--- catches a luxury regardless of which one put it there. Deletes rather
--- than relocates, same reasoning as StripLuxuryOnTinyPeaksIslands: every
--- quota pass is already done by this point in the pipeline, so a
--- shortfall here should just stay a shortfall.
+-- decent -- non-Snow, non-water, non-Ice, non-Mountain -- the goal is to
+-- exclude the harshest (worst in gameplay terms) spots from eligibility.
+-- Judged from the final committed terrain, not from any particular
+-- placement pass, so it catches a luxury regardless of which one put it
+-- there. Deletes rather than relocates, same reasoning as
+-- StripLuxuryOnTinyPeaksIslands: every quota pass is already done by this
+-- point in the pipeline, so a shortfall here should just stay a shortfall.
 function StripFrostyHarshLuxuries()
 	local cfg = GetBarrierConfig();
 	if cfg == nil or cfg.kind ~= "frosty" then
@@ -9769,7 +9770,11 @@ function StripFrostyHarshLuxuries()
 		maxX = math.floor(iW / 2) - 1;
 	end
 	local function isDecent(plot)
-		return plot ~= nil and plot:IsWater() == false and plot:GetTerrainType() ~= TerrainTypes.TERRAIN_SNOW;
+		return plot ~= nil
+			and plot:IsWater() == false
+			and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
+			and plot:GetTerrainType() ~= TerrainTypes.TERRAIN_SNOW
+			and plot:GetFeatureType() ~= FeatureTypes.FEATURE_ICE;
 	end
 	local nStripped = 0;
 	local y = 0;
@@ -13390,7 +13395,13 @@ function AddFrostyJungleFingers()
 	end
 	local core = {anchor};
 	plantJungle(anchor);
-	local coreTarget = 8 + Map.Rand(6, "Frosty Jungle Core Size");
+	-- Core, finger count and finger length all widened well beyond their
+	-- old ranges -- roughly +50% on average, but with a much wider spread
+	-- than before so the total amount of Jungle varies a lot roll to roll
+	-- (the user explicitly wants high noise on amount here, the opposite of
+	-- the back coast's own request), rather than just being a bigger fixed
+	-- target.
+	local coreTarget = 4 + Map.Rand(24, "Frosty Jungle Core Size");
 	local qi = 1;
 	while qi <= #core and #core < coreTarget do
 		local p = core[qi];
@@ -13407,13 +13418,15 @@ function AddFrostyJungleFingers()
 			end
 		end
 	end
-	local nFingers = 4 + Map.Rand(3, "Frosty Jungle Finger Count");
-	local f = 1;
-	while f <= nFingers do
-		local origin = core[1 + Map.Rand(#core, "Frosty Jungle Finger Origin")];
-		local cx, cy = origin:GetX(), origin:GetY();
-		local dir = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Frosty Jungle Finger Dir");
-		local len = 3 + Map.Rand(5, "Frosty Jungle Finger Length");
+	-- Walks a single finger from (cx, cy) in direction dir for up to len
+	-- steps, same meander/taper shape as before. When allowBranch is true,
+	-- a finger past step 2 has a real chance each step of spawning a
+	-- branch point (a distinctly different direction, not just another
+	-- wobble) -- returned to the caller rather than recursed into directly,
+	-- so branches never spawn further branches of their own (capped at one
+	-- level deep) and can't runaway into an exponential sprawl.
+	local function growFinger(cx, cy, dir, len, allowBranch)
+		local branches = {};
 		local step = 0;
 		while step < len do
 			if Map.Rand(100, "Frosty Jungle Finger Meander") < 55 then
@@ -13433,13 +13446,38 @@ function AddFrostyJungleFingers()
 			end
 			plantJungle(adj);
 			step = step + 1;
+			if allowBranch and step >= 2 and Map.Rand(100, "Frosty Jungle Finger Branch") < 18 then
+				local branchTurn = 2;
+				if Map.Rand(2, "Frosty Jungle Finger Branch Side") == 0 then
+					branchTurn = -2;
+				end
+				table.insert(branches, {cx, cy, (dir + branchTurn) % DirectionTypes.NUM_DIRECTION_TYPES});
+			end
 			if step >= 2 and Map.Rand(100, "Frosty Jungle Finger Taper") < (8 + step * 5) then
 				break
 			end
 		end
+		return branches;
+	end
+	local nFingers = 3 + Map.Rand(10, "Frosty Jungle Finger Count");
+	local nBranches = 0;
+	local f = 1;
+	while f <= nFingers do
+		local origin = core[1 + Map.Rand(#core, "Frosty Jungle Finger Origin")];
+		local dir = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Frosty Jungle Finger Dir");
+		local len = 2 + Map.Rand(12, "Frosty Jungle Finger Length");
+		local branches = growFinger(origin:GetX(), origin:GetY(), dir, len, true);
+		local bi = 1;
+		while bi <= #branches and bi <= 2 do
+			local b = branches[bi];
+			local blen = 1 + Map.Rand(5, "Frosty Jungle Finger Branch Length");
+			growFinger(b[1], b[2], b[3], blen, false);
+			nBranches = nBranches + 1;
+			bi = bi + 1;
+		end
 		f = f + 1;
 	end
-	print("Frosty jungle fingers: core=", #core, " fingers=", nFingers);
+	print("Frosty jungle fingers: core=", #core, " fingers=", nFingers, " branches=", nBranches);
 end
 ------------------------------------------------------------------------------
 function CountMireMountainNeighbors(plot)
