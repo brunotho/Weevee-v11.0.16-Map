@@ -166,10 +166,6 @@ local peakDist = {};
 local peakNX = {};
 local peakNY = {};
 local peakMassif = {};
-local peakHillStyle = {};
-local peakHillT1 = {};
-local peakHillT2 = {};
-local peakHillT3 = {};
 local peakForestStyle = {};
 local nPeakMassifs = 0;
 local riverEdgeList = {};
@@ -15338,20 +15334,6 @@ end
 function PeakRollMassifKnobs()
 	nPeakMassifs = nPeakMassifs + 1;
 	local id = nPeakMassifs;
-	-- Thresholds nudged up from their previous values (fewer tiles clear the
-	-- now-higher fractal-percentile bar, so the collar reads slightly
-	-- thinner) and widened a little for more massif-to-massif variety.
-	if Map.Rand(2, "Peaks Hill Style") == 0 then
-		peakHillStyle[id] = 1;
-		peakHillT1[id] = 0;
-		peakHillT2[id] = 28 + Map.Rand(20, "Peaks Thick T2");
-		peakHillT3[id] = 92 + Map.Rand(8, "Peaks Thick T3");
-	else
-		peakHillStyle[id] = 2;
-		peakHillT1[id] = 32 + Map.Rand(26, "Peaks Spike T1");
-		peakHillT2[id] = 46 + Map.Rand(22, "Peaks Spike T2");
-		peakHillT3[id] = 62 + Map.Rand(24, "Peaks Spike T3");
-	end
 	local fr = Map.Rand(100, "Peaks Forest Style");
 	if fr < 38 then
 		peakForestStyle[id] = 1;
@@ -15366,10 +15348,6 @@ end
 function PeakRollFrontKnobs()
 	nPeakMassifs = nPeakMassifs + 1;
 	local id = nPeakMassifs;
-	peakHillStyle[id] = 2;
-	peakHillT1[id] = 50 + Map.Rand(20, "Peaks Front T1");
-	peakHillT2[id] = 70 + Map.Rand(15, "Peaks Front T2");
-	peakHillT3[id] = 88 + Map.Rand(10, "Peaks Front T3");
 	peakForestStyle[id] = 1;
 	return id;
 end
@@ -15438,10 +15416,6 @@ function AddPeaksLayout()
 	peakNX = {};
 	peakNY = {};
 	peakMassif = {};
-	peakHillStyle = {};
-	peakHillT1 = {};
-	peakHillT2 = {};
-	peakHillT3 = {};
 	peakForestStyle = {};
 	nPeakMassifs = 0;
 	local cfg = GetBarrierConfig();
@@ -15622,18 +15596,15 @@ function AddPeaksLayout()
 			ddir = ddir + 1;
 		end
 	end
-	local hillFrac = Fractal.Create(iW, iH, 5, Map.GetFractalFlags(), -1, -1);
-	-- Independent, differently-grained noise field layered on top of the
-	-- smooth per-massif-style collar below, so its edge reads as ragged and
-	-- organic instead of a clean concentric ring: a chance to drop a tile
-	-- the style/threshold check would have made a hill, and a chance to add
-	-- one it wouldn't have -- extended out to d==4/5, which the style
-	-- thresholds never touch at all otherwise (nothing between the d<=3
-	-- collar and the sparse d>=6 far-hill roll).
-	local noiseFrac = Fractal.Create(iW, iH, 6, Map.GetFractalFlags(), -1, -1);
-	local noiseLoThresh = noiseFrac:GetHeight(14);
-	local noiseHiThresh = noiseFrac:GetHeight(92);
-	local nHill = 0;
+	-- Publish the BFS distance/nearest-massif fields (still needed by the
+	-- forest placement code elsewhere -- AddPeaksMassifForests, meadow/river
+	-- eligibility, etc.) and reset every non-mountain, non-water tile in the
+	-- zone to flat land. Hills are no longer decided here at all -- see the
+	-- starfish-finger pass right below, which replaces the old smooth,
+	-- fractal-threshold-driven ring collar (it read as one dense, chunky
+	-- band around every peak) with a handful of thin, meandering arms
+	-- radiating out from each massif's own mountains, most of a massif's
+	-- immediate surroundings deliberately left flat in between.
 	y = 0;
 	while y < iH do
 		local x = 0;
@@ -15651,57 +15622,51 @@ function AddPeaksLayout()
 					if plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
 						plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
 					else
-						local d = dist[i];
-						local makeHill = false;
-						if d < INF then
-							local id = mz[i];
-							local st = 1;
-							local p1 = 0;
-							local p2 = 32;
-							local p3 = 92;
-							if id ~= nil and peakHillStyle[id] ~= nil then
-								st = peakHillStyle[id];
-								p1 = peakHillT1[id];
-								p2 = peakHillT2[id];
-								p3 = peakHillT3[id];
-							end
-							local hh = hillFrac:GetHeight(x, y);
-							if st == 1 then
-								if d == 1 then
-									makeHill = true;
-								elseif d == 2 and hh >= hillFrac:GetHeight(p2) then
-									makeHill = true;
-								elseif d == 3 and hh >= hillFrac:GetHeight(p3) then
-									makeHill = true;
-								end
-							else
-								if d == 1 and hh >= hillFrac:GetHeight(p1) then
-									makeHill = true;
-								elseif d == 2 and hh >= hillFrac:GetHeight(p2) then
-									makeHill = true;
-								elseif d == 3 and hh >= hillFrac:GetHeight(p3) then
-									makeHill = true;
-								end
-							end
+						plot:SetPlotType(PlotTypes.PLOT_LAND, false, false);
+						plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+					end
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	-- Starfish fingers: each massif's mountain tiles are grouped up, then a
+	-- handful of thin single-tile-wide arms grow outward from randomly
+	-- chosen mountains, meandering (a chance each step to veer one hex-turn
+	-- left or right) and tapering off early more often the further out they
+	-- get, so each finger ends in a point instead of all being the same
+	-- length. An arm stops the moment it would step onto water, the barrier,
+	-- another mountain, or a tile some other finger already hilled.
+	local nHill = 0;
+	local massifMountains = {};
+	local massifEdgeMountains = {};
+	y = 0;
+	while y < iH do
+		local x = 0;
+		while x < iW do
+			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
+				local plot = Map.GetPlot(x, y);
+				if plot ~= nil and plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
+					local id = peakMassif[y * iW + x + 1];
+					if id ~= nil then
+						if massifMountains[id] == nil then
+							massifMountains[id] = {};
+							massifEdgeMountains[id] = {};
 						end
-						if d < INF and d <= 5 then
-							local nz = noiseFrac:GetHeight(x, y);
-							if nz < noiseLoThresh then
-								makeHill = false;
-							elseif nz >= noiseHiThresh then
-								makeHill = true;
+						table.insert(massifMountains[id], {x, y});
+						local hasLandNeighbor = false;
+						local d = 0;
+						while d < DirectionTypes.NUM_DIRECTION_TYPES do
+							local adj = PlotDirNoXWrap(x, y, d);
+							if adj ~= nil and adj:IsWater() == false and adj:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
+								hasLandNeighbor = true;
+								break
 							end
+							d = d + 1;
 						end
-						if makeHill == false and d >= 6 and d < INF and Map.Rand(100, "Peaks Far Hill") < 8 then
-							makeHill = true;
-						end
-						if makeHill then
-							plot:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
-							plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-							nHill = nHill + 1;
-						else
-							plot:SetPlotType(PlotTypes.PLOT_LAND, false, false);
-							plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+						if hasLandNeighbor then
+							table.insert(massifEdgeMountains[id], {x, y});
 						end
 					end
 				end
@@ -15710,7 +15675,61 @@ function AddPeaksLayout()
 		end
 		y = y + 1;
 	end
-	print("Peaks blobs mountains:", blobN, " hill collar:", nHill, " massifs:", nPlaced, " rolled:", nBlobs, " doubles:", nDouble, " styles:", nPeakMassifs);
+	local function fingerEligible(x, y)
+		if x == nil or y == nil or skip[x] == true then
+			return false
+		end
+		if mirrored and x > iW * 0.5 then
+			return false
+		end
+		local plot = Map.GetPlot(x, y);
+		return plot ~= nil and plot:GetPlotType() == PlotTypes.PLOT_LAND;
+	end
+	local function growFinger(pool)
+		local origin = pool[1 + Map.Rand(#pool, "Peaks Finger Origin")];
+		local dir = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Peaks Finger Dir");
+		local cx, cy = origin[1], origin[2];
+		local len = 3 + Map.Rand(5, "Peaks Finger Length");
+		local step = 0;
+		while step < len do
+			if Map.Rand(100, "Peaks Finger Meander") < 40 then
+				local turn = 1;
+				if Map.Rand(2, "Peaks Finger Turn") == 0 then
+					turn = -1;
+				end
+				dir = (dir + turn) % DirectionTypes.NUM_DIRECTION_TYPES;
+			end
+			local adj = PlotDirNoXWrap(cx, cy, dir);
+			if adj == nil then
+				break
+			end
+			cx, cy = adj:GetX(), adj:GetY();
+			if fingerEligible(cx, cy) == false then
+				break
+			end
+			adj:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
+			adj:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+			nHill = nHill + 1;
+			step = step + 1;
+			if step >= 2 and Map.Rand(100, "Peaks Finger Taper") < (10 + step * 6) then
+				break
+			end
+		end
+	end
+	local massifId, mountains;
+	for massifId, mountains in pairs(massifMountains) do
+		local pool = massifEdgeMountains[massifId];
+		if pool == nil or #pool < 1 then
+			pool = mountains;
+		end
+		local nFingers = 4 + Map.Rand(3, "Peaks Finger Count");
+		local f = 1;
+		while f <= nFingers do
+			growFinger(pool);
+			f = f + 1;
+		end
+	end
+	print("Peaks blobs mountains:", blobN, " hill fingers:", nHill, " massifs:", nPlaced, " rolled:", nBlobs, " doubles:", nDouble, " styles:", nPeakMassifs);
 	PeakFlattenFrontTundraHills();
 	PeakScatterFrontRelief();
 	AddPeaksStrayMountains();
