@@ -465,11 +465,12 @@ function ResolveSaltWaterPlan()
 			-- compact corner blob instead of a long thin stretch the full
 			-- height of the back coast -- room for one proper peak-island
 			-- plus a handful of splinters, not a scatter of tiny islets
-			-- stretched the whole way up the map. 35-50% (rather than the
-			-- original 60-75%) roughly triples the blob's surface area
-			-- together with the widened column depth below, while still
-			-- varying per roll instead of pinning one fixed size/shape.
-			saltCutPct = 35 + Map.Rand(16, "Peaks BackCoast Cut");
+			-- stretched the whole way up the map. 26-41% (down from the
+			-- original 60-75%, then 35-50%) keeps growing the blob's kept
+			-- height -- this step is another ~15% more surface area on top
+			-- of the previous version -- while still varying per roll
+			-- instead of pinning one fixed size/shape.
+			saltCutPct = 26 + Map.Rand(16, "Peaks BackCoast Cut");
 			saltNSeas = 0;
 		elseif Map.Rand(2, "Explo back coast plan") == 0 then
 			saltCutPct = 50;
@@ -15689,10 +15690,14 @@ function AddPeaksLayout()
 		local origin = pool[1 + Map.Rand(#pool, "Peaks Finger Origin")];
 		local dir = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Peaks Finger Dir");
 		local cx, cy = origin[1], origin[2];
-		local len = 3 + Map.Rand(5, "Peaks Finger Length");
+		-- Length and taper both nudged up from their original values (4-9
+		-- instead of 3-7, gentler taper ramp) for slightly larger arms on
+		-- average, and the meander chance raised (40% -> 55%) for a medium
+		-- bit more noise in the path itself.
+		local len = 4 + Map.Rand(6, "Peaks Finger Length");
 		local step = 0;
 		while step < len do
-			if Map.Rand(100, "Peaks Finger Meander") < 40 then
+			if Map.Rand(100, "Peaks Finger Meander") < 55 then
 				local turn = 1;
 				if Map.Rand(2, "Peaks Finger Turn") == 0 then
 					turn = -1;
@@ -15710,8 +15715,24 @@ function AddPeaksLayout()
 			adj:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
 			adj:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
 			nHill = nHill + 1;
+			-- A small chance to also tick a single tile off to one side --
+			-- a tiny twig, adding texture/noise without turning the whole
+			-- arm, so the finger doesn't read as a perfectly clean line.
+			if Map.Rand(100, "Peaks Finger Twig Chance") < 15 then
+				local twigTurn = 1;
+				if Map.Rand(2, "Peaks Finger Twig Side") == 0 then
+					twigTurn = -1;
+				end
+				local twigDir = (dir + twigTurn) % DirectionTypes.NUM_DIRECTION_TYPES;
+				local twig = PlotDirNoXWrap(cx, cy, twigDir);
+				if twig ~= nil and fingerEligible(twig:GetX(), twig:GetY()) then
+					twig:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
+					twig:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+					nHill = nHill + 1;
+				end
+			end
 			step = step + 1;
-			if step >= 2 and Map.Rand(100, "Peaks Finger Taper") < (10 + step * 6) then
+			if step >= 2 and Map.Rand(100, "Peaks Finger Taper") < (8 + step * 5) then
 				break
 			end
 		end
@@ -15889,8 +15910,14 @@ function AddPeaksBackCoastIslands()
 					end
 					qi = qi + 1;
 				end
-				local nonMountain = isPeak and 0 or #footprint;
-				growHalo(footprint, isPeak, math.max(0, 3 - nonMountain) + Map.Rand(2, "Peaks BackCoast Chunky Island Halo"));
+				-- Non-Mountain tiles must reach at least the Mountain count
+				-- (a 50/50 split at worst, land the majority otherwise), not
+				-- just a flat floor of 3 -- a bigger mountain core needs a
+				-- bigger halo to match.
+				local mountainCount = isPeak and #footprint or 0;
+				local nonMountain = #footprint - mountainCount;
+				local haloFloor = math.max(0, mountainCount - nonMountain);
+				growHalo(footprint, isPeak, haloFloor + Map.Rand(2, "Peaks BackCoast Chunky Island Halo"));
 				claimWithMoat(footprint);
 				return true
 			end
