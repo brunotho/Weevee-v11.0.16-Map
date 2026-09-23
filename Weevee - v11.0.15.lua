@@ -9406,6 +9406,98 @@ function OasisJadeFlatDesertToHill()
 	WeeveeDbg("Oasis Jade flat desert to hill: " .. raised);
 end
 ------------------------------------------------------------------------------
+-- No luxury should ever end up on a "tiny" island (1-2 land tiles, Mountain
+-- tiles not counted toward that total) -- Peaky's back-coast splinters are
+-- meant to be scenery, not an extra luxury slot. Judged from the actual
+-- final terrain rather than from AddPeaksBackCoastIslands' own placement
+-- bookkeeping, so it catches a luxury landing there regardless of which
+-- pass put it there (vanilla's own placement, EnsureRegionalLuxuryTarget's
+-- forcing, EnsureLuxuryQuota's padding, ...) and regardless of whether a
+-- chunky island's halo growth came up short of its own 3-tile target.
+-- Deletes rather than relocates: by this very-late point in the pipeline
+-- every luxury-quota pass is already done, so a shortfall here should just
+-- stay a shortfall (same reasoning as ClimateAllowsInteriorPolarTerrain)
+-- rather than risk shoving the resource somewhere else not actually meant
+-- for it.
+function StripLuxuryOnTinyPeaksIslands()
+	local cfg = GetBarrierConfig();
+	if cfg == nil or cfg.kind ~= "peaks" then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local maxX = iW - 1;
+	if DEF_MIRRORED == 1 then
+		maxX = math.floor(iW / 2) - 1;
+	end
+	local visited = {};
+	local function key(x, y)
+		return y * iW + x;
+	end
+	local nStripped = 0;
+	local y = 0;
+	while y < iH do
+		local x = 0;
+		while x <= maxX do
+			local plot = Map.GetPlot(x, y);
+			if plot ~= nil and plot:IsWater() == false and visited[key(x, y)] ~= true then
+				-- Flood-fill the whole physically contiguous non-water
+				-- landmass this tile belongs to, walking through Land/
+				-- Hills/Mountain alike (a mountain doesn't split a
+				-- landmass in two), but only counting non-Mountain tiles
+				-- toward the tiny/chunky size. Bails out early once it's
+				-- clearly not tiny (>2) so a mainland flood-fill doesn't
+				-- have to enumerate the whole continent every time.
+				local qx, qy = {x}, {y};
+				local land = {};
+				visited[key(x, y)] = true;
+				local nonMountain = 0;
+				local isTiny = true;
+				local qi = 1;
+				while qi <= #qx do
+					local cx, cy = qx[qi], qy[qi];
+					qi = qi + 1;
+					local cplot = Map.GetPlot(cx, cy);
+					if cplot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
+						nonMountain = nonMountain + 1;
+						table.insert(land, cplot);
+						if nonMountain > 2 then
+							isTiny = false;
+							break
+						end
+					end
+					local d = 0;
+					while d < DirectionTypes.NUM_DIRECTION_TYPES do
+						local adj = PlotDirNoXWrap(cx, cy, d);
+						if adj ~= nil and adj:IsWater() == false and adj:GetX() <= maxX then
+							local k = key(adj:GetX(), adj:GetY());
+							if visited[k] ~= true then
+								visited[k] = true;
+								table.insert(qx, adj:GetX());
+								table.insert(qy, adj:GetY());
+							end
+						end
+						d = d + 1;
+					end
+				end
+				if isTiny then
+					local li = 1;
+					while li <= #land do
+						local lp = land[li];
+						if IsWeeveeLuxuryID(lp:GetResourceType(-1)) then
+							lp:SetResourceType(-1);
+							nStripped = nStripped + 1;
+						end
+						li = li + 1;
+					end
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	WeeveeDbg("Tiny-island luxuries stripped: " .. nStripped);
+end
+------------------------------------------------------------------------------
 function AddWetlandRiverDesert()
 	do return end
 	local pct = cfg.riverDesertPct;
@@ -15709,76 +15801,104 @@ function AddPeaksBackCoastIslands()
 		end
 		return GetShuffledCopyOfTable(cands);
 	end
-	-- Small hill/land halo around a footprint, matching the inland massifs'
+	-- Small hill/land halo grown from any tile already in the footprint (not
+	-- just the original seed -- a multi-tile massif's own growth often eats
+	-- the seed's own neighbors, so trying every member gives a much better
+	-- chance of actually reaching haloTarget), matching the inland massifs'
 	-- own collar vibe instead of reading as a bare rock.
-	local function growHalo(footprint, seed, isPeak, haloTarget)
-		local sx, sy = seed:GetX(), seed:GetY();
+	local function growHalo(footprint, isPeak, haloTarget)
 		local haloGrown = 0;
-		local d0 = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Peaks BackCoast Island Halo Dir");
-		local k = 0;
-		while k < DirectionTypes.NUM_DIRECTION_TYPES and haloGrown < haloTarget do
-			local d = (d0 + k) % DirectionTypes.NUM_DIRECTION_TYPES;
-			k = k + 1;
-			local adj = PlotDirNoXWrap(sx, sy, d);
-			if adj ~= nil and adj:GetX() <= bandMax and adj:IsWater()
-				and isClaimed(adj:GetX(), adj:GetY()) == false
-				and touchesMainland(adj) == false then
-				if isPeak and Map.Rand(2, "Peaks BackCoast Island Halo Type") == 0 then
-					adj:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
-				else
-					adj:SetPlotType(PlotTypes.PLOT_LAND, false, false);
+		local qi = 1;
+		while qi <= #footprint and haloGrown < haloTarget do
+			local px, py = footprint[qi][1], footprint[qi][2];
+			local d0 = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Peaks BackCoast Island Halo Dir");
+			local k = 0;
+			while k < DirectionTypes.NUM_DIRECTION_TYPES and haloGrown < haloTarget do
+				local d = (d0 + k) % DirectionTypes.NUM_DIRECTION_TYPES;
+				k = k + 1;
+				local adj = PlotDirNoXWrap(px, py, d);
+				if adj ~= nil and adj:GetX() <= bandMax and adj:IsWater()
+					and isClaimed(adj:GetX(), adj:GetY()) == false
+					and touchesMainland(adj) == false then
+					if isPeak and Map.Rand(2, "Peaks BackCoast Island Halo Type") == 0 then
+						adj:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
+					else
+						adj:SetPlotType(PlotTypes.PLOT_LAND, false, false);
+					end
+					adj:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+					table.insert(footprint, {adj:GetX(), adj:GetY()});
+					haloGrown = haloGrown + 1;
 				end
-				adj:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-				table.insert(footprint, {adj:GetX(), adj:GetY()});
-				haloGrown = haloGrown + 1;
 			end
+			qi = qi + 1;
 		end
 	end
-	-- The one proper peak island: a small connected mountain massif (3-5
-	-- tiles), not just a single splinter, with a real 2-3 tile collar.
-	local nPeakPlaced = 0;
-	local candidates = gatherCandidates();
-	local ci = 1;
-	while nPeakPlaced < 1 and ci <= #candidates do
-		local seed = candidates[ci];
-		ci = ci + 1;
-		if seed:IsWater() and isClaimed(seed:GetX(), seed:GetY()) == false then
-			local target = 3 + Map.Rand(3, "Peaks BackCoast Peak Island Size");
-			local footprint = {{seed:GetX(), seed:GetY()}};
-			seed:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
-			seed:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-			local qi = 1;
-			while qi <= #footprint and #footprint < target do
-				local px, py = footprint[qi][1], footprint[qi][2];
-				local d0 = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Peaks BackCoast Peak Island Grow Dir");
-				local k = 0;
-				while k < DirectionTypes.NUM_DIRECTION_TYPES and #footprint < target do
-					local d = (d0 + k) % DirectionTypes.NUM_DIRECTION_TYPES;
-					k = k + 1;
-					local adj = PlotDirNoXWrap(px, py, d);
-					if adj ~= nil and adj:GetX() <= bandMax and adj:IsWater()
-						and isClaimed(adj:GetX(), adj:GetY()) == false
-						and touchesMainland(adj) == false
-						and Map.Rand(100, "Peaks BackCoast Peak Island Grow") < 70 then
-						adj:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
-						adj:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-						table.insert(footprint, {adj:GetX(), adj:GetY()});
+	-- A "chunky" island: a small connected massif (3-5 tiles, mountain if
+	-- isPeak else hills) plus a halo topped up until the footprint has at
+	-- least 3 non-Mountain tiles total, so it reliably counts as chunky (see
+	-- StripLuxuryOnTinyPeaksIslands) and stays luxury-eligible regardless of
+	-- how the core/halo split landed.
+	local function placeChunkyIsland(isPeak)
+		local candidates = gatherCandidates();
+		local ci = 1;
+		while ci <= #candidates do
+			local seed = candidates[ci];
+			ci = ci + 1;
+			if seed:IsWater() and isClaimed(seed:GetX(), seed:GetY()) == false then
+				local target = 3 + Map.Rand(3, "Peaks BackCoast Chunky Island Size");
+				local corePlotType = isPeak and PlotTypes.PLOT_MOUNTAIN or PlotTypes.PLOT_HILLS;
+				local footprint = {{seed:GetX(), seed:GetY()}};
+				seed:SetPlotType(corePlotType, false, false);
+				seed:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+				local qi = 1;
+				while qi <= #footprint and #footprint < target do
+					local px, py = footprint[qi][1], footprint[qi][2];
+					local d0 = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Peaks BackCoast Chunky Island Grow Dir");
+					local k = 0;
+					while k < DirectionTypes.NUM_DIRECTION_TYPES and #footprint < target do
+						local d = (d0 + k) % DirectionTypes.NUM_DIRECTION_TYPES;
+						k = k + 1;
+						local adj = PlotDirNoXWrap(px, py, d);
+						if adj ~= nil and adj:GetX() <= bandMax and adj:IsWater()
+							and isClaimed(adj:GetX(), adj:GetY()) == false
+							and touchesMainland(adj) == false
+							and Map.Rand(100, "Peaks BackCoast Chunky Island Grow") < 70 then
+							adj:SetPlotType(corePlotType, false, false);
+							adj:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+							table.insert(footprint, {adj:GetX(), adj:GetY()});
+						end
 					end
+					qi = qi + 1;
 				end
-				qi = qi + 1;
+				local nonMountain = isPeak and 0 or #footprint;
+				growHalo(footprint, isPeak, math.max(0, 3 - nonMountain) + Map.Rand(2, "Peaks BackCoast Chunky Island Halo"));
+				claimWithMoat(footprint);
+				return true
 			end
-			growHalo(footprint, seed, true, 2 + Map.Rand(2, "Peaks BackCoast Peak Island Halo"));
-			claimWithMoat(footprint);
-			nPeakPlaced = 1;
+		end
+		return false
+	end
+	-- One proper peak island, always -- then a ~20% chance of a second
+	-- chunky island alongside it (peak or plain hill/land massif) so "at
+	-- least one is a peak" is guaranteed by the first regardless of the
+	-- second's roll.
+	local nChunkyPlaced = 0;
+	if placeChunkyIsland(true) then
+		nChunkyPlaced = 1;
+		if Map.Rand(100, "Peaks BackCoast Second Chunky") < 20 then
+			if placeChunkyIsland(Map.Rand(100, "Peaks BackCoast Second Chunky Peak") < 55) then
+				nChunkyPlaced = 2;
+			end
 		end
 	end
 	-- A handful of tiny splintered cliffs sprinkled around the same blob --
-	-- mostly bare rock (rarely a token 1-tile halo), distinct from the one
-	-- proper peak island above.
+	-- mostly bare rock (rarely a token 1-tile halo), distinct from the
+	-- chunky island(s) above and always small enough that
+	-- StripLuxuryOnTinyPeaksIslands will keep them luxury-free.
 	local nSplinterTarget = 3 + Map.Rand(4, "Peaks BackCoast Splinter Count");
 	local nSplinterPlaced = 0;
-	candidates = gatherCandidates();
-	ci = 1;
+	local candidates = gatherCandidates();
+	local ci = 1;
 	while nSplinterPlaced < nSplinterTarget and ci <= #candidates do
 		local seed = candidates[ci];
 		ci = ci + 1;
@@ -15787,13 +15907,13 @@ function AddPeaksBackCoastIslands()
 			seed:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
 			seed:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
 			if Map.Rand(100, "Peaks BackCoast Splinter Halo Chance") < 30 then
-				growHalo(footprint, seed, true, 1);
+				growHalo(footprint, true, 1);
 			end
 			claimWithMoat(footprint);
 			nSplinterPlaced = nSplinterPlaced + 1;
 		end
 	end
-	print("Peaks back-coast islands: peak island=", nPeakPlaced, " splinters=", nSplinterPlaced, "/", nSplinterTarget);
+	print("Peaks back-coast islands: chunky=", nChunkyPlaced, " splinters=", nSplinterPlaced, "/", nSplinterTarget);
 end
 ------------------------------------------------------------------------------
 function AddPeaksRainShadowDesert()
@@ -18907,6 +19027,7 @@ function StartPlotSystem()
 	WeeveeDbgCall("TrimLuxuryQuotaExcess", function() TrimLuxuryQuotaExcess(start_plot_database) end);
 	WeeveeDbgCall("EnsureFurOnTundraHasForest", EnsureFurOnTundraHasForest);
 	WeeveeDbgCall("OasisJadeFlatDesertToHill", OasisJadeFlatDesertToHill);
+	WeeveeDbgCall("StripLuxuryOnTinyPeaksIslands", StripLuxuryOnTinyPeaksIslands);
 	WeeveeDbgCall("LogRegionalLuxuryCounts-preMirror", function() LogRegionalLuxuryCounts(start_plot_database, "pre-mirror-final") end);
 	WeeveeDbg("before mirror");
 	if DEF_MIRRORED == 1 then
