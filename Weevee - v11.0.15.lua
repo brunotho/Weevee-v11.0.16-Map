@@ -8357,20 +8357,32 @@ function TrimLuxuryQuotaExcess(asp)
 		return false
 	end
 	local nTrimmed = 0;
+	-- nTrip (from GatherLuxuryTiers) counts every type with >=3 copies, not
+	-- just ones sitting at exactly 3 -- picking only an exact-3 match here
+	-- meant a non-regional type that already had 4+ copies (vanilla
+	-- placement, city-state seeding, or EnsureLuxuryQuota padding landing on
+	-- it) could never be selected at all, so it sat there inflating nTrip
+	-- forever with nothing ever trimming it back out of the tier. Instead,
+	-- pick whichever unprotected type still in the tier has the LOWEST
+	-- count -- for a type already at exactly 3 this behaves identically to
+	-- before (one removal drops it out immediately); for a leftover 4/5/6+
+	-- copy type it gets walked down one copy per loop iteration until it
+	-- finally drops below 3 and actually exits the tier.
 	while nTrip > wantT do
-		local target = nil;
+		local target, targetN = nil, nil;
 		local resID, n;
 		for resID, n in pairs(counts) do
-			if n == 3 and protected[resID] ~= true then
-				target = resID;
-				break
+			if n >= 3 and protected[resID] ~= true and (targetN == nil or n < targetN) then
+				target, targetN = resID, n;
 			end
 		end
 		if target == nil or removeOneCopy(target) == false then
 			break
 		end
 		counts[target] = counts[target] - 1;
-		nTrip = nTrip - 1;
+		if counts[target] < 3 then
+			nTrip = nTrip - 1;
+		end
 		nTrimmed = nTrimmed + 1;
 	end
 	while nDup > wantD do
