@@ -487,13 +487,22 @@ function ResolveSaltWaterPlan()
 			-- instead of pinning one fixed size/shape.
 			saltCutPct = 26 + Map.Rand(16, "Peaks BackCoast Cut");
 			saltNSeas = 0;
+		elseif cfg ~= nil and cfg.kind == "frosty" then
+			-- The generic 50/50 split (cutPct 25 or 50, picked once per
+			-- roll) is a huge swing in kept height on its own (keepH varies
+			-- roughly 2x between the two outcomes) -- fine when the coast's
+			-- *shape* is also meant to vary just as much, but the user
+			-- wants shape/layout noise kept high while total surface area
+			-- varies much less roll to roll. The row-to-row depth random
+			-- walk (see ShapeNoWrapBackstrip's isFrosty branch) already
+			-- averages out to roughly the same typical depth over many rows
+			-- regardless of roll, so keepH's own coin-flip was the actual
+			-- dominant source of total-area variance. A narrow, climate-
+			-- specific band here (43-50%, vs. the old binary 25-or-50)
+			-- keeps keepH within a few rows of the same value every time.
+			saltCutPct = 43 + Map.Rand(8, "Frosty BackCoast Cut");
+			saltNSeas = 0;
 		else
-			-- Frosty no longer gets its own special-cased split here (see the
-			-- climate's from-scratch redesign) -- its back coast is anchored
-			-- to the northwest cold corner by ShapeNoWrapBackstrip's own
-			-- isFrosty branch regardless of which of these two generic
-			-- budgets it rolls, so it just uses the same reusable 50/50
-			-- split every other non-special-cased climate does.
 			if Map.Rand(2, "Explo back coast plan") == 0 then
 				saltCutPct = 50;
 				saltNSeas = 2;
@@ -6975,9 +6984,14 @@ function GenerateTerrain()
 		-- rather than a real jungle mass. Desert and Jungle still overlap
 		-- from 0.15-0.30 for a believable mixed warm/dry transition, same
 		-- reasoning as before, just pushed past Jungle's new solid core.
+		-- Desert cut by roughly 30% (35 -> 25) per the user's request -- it
+		-- was reading as too much of the warm corner. AddFrostyDesertHills
+		-- (GenerateTerrain, after this) tops up whatever Desert does spawn
+		-- with a fair share of Hills, since it was showing up suspiciously
+		-- flat in practice.
 		args.fSnowLatitude = 0.60;
 		args.fTundraLatitude = 0.45;
-		args.iDesertPercent = 35;
+		args.iDesertPercent = 25;
 		args.iPlainsPercent = 45;
 		args.fGrassLatitude = 0.18;
 		args.fDesertBottomLatitude = 0.15;
@@ -7002,6 +7016,8 @@ function GenerateTerrain()
 	AddBrambleLayout();
 	AddFrostyPolarMountainRidge();
 	AddFrostySnowFingers();
+	AddFrostySnowHills();
+	AddFrostyDesertHills();
 	WeeveeDbg("GenerateTerrain done");
 end
 ------------------------------------------------------------------------------
@@ -13238,6 +13254,76 @@ function AddFrostySnowFingers()
 		end
 	end
 	print("Frosty snow fingers:", nFingers, " tiles:", nSet);
+end
+------------------------------------------------------------------------------
+-- Snow reads a bit too flat -- promotes a modest fraction of flat Snow
+-- tiles to Hills, independent of whatever the ambient elevation fractal
+-- already put there. Runs after AddFrostySnowFingers so the fingers'
+-- own newly-carved Snow tiles are eligible too.
+function AddFrostySnowHills()
+	local cfg = GetBarrierConfig();
+	if cfg == nil or cfg.kind ~= "frosty" then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local mirrored = (DEF_MIRRORED == 1);
+	local skip = FillMireSkip(iW);
+	local n = 0;
+	local y = 0;
+	while y < iH do
+		local x = 0;
+		while x < iW do
+			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
+				local plot = Map.GetPlot(x, y);
+				if plot ~= nil and plot:GetPlotType() == PlotTypes.PLOT_LAND
+					and plot:GetTerrainType() == TerrainTypes.TERRAIN_SNOW then
+					if Map.Rand(100, "Frosty Snow Hill") < 22 then
+						plot:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
+						n = n + 1;
+					end
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	print("Frosty snow hills added:", n);
+end
+------------------------------------------------------------------------------
+-- Desert reads suspiciously flat in places -- promotes a modest fraction of
+-- flat Desert tiles to Hills, independent of whatever the ambient elevation
+-- fractal already put there (Desert terrain itself doesn't structurally
+-- exclude Hills anywhere in this file; this exists to guarantee a fair
+-- share regardless of whatever's actually behind the flat patches observed
+-- in practice).
+function AddFrostyDesertHills()
+	local cfg = GetBarrierConfig();
+	if cfg == nil or cfg.kind ~= "frosty" then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local mirrored = (DEF_MIRRORED == 1);
+	local skip = FillMireSkip(iW);
+	local n = 0;
+	local y = 0;
+	while y < iH do
+		local x = 0;
+		while x < iW do
+			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
+				local plot = Map.GetPlot(x, y);
+				if plot ~= nil and plot:GetPlotType() == PlotTypes.PLOT_LAND
+					and plot:GetTerrainType() == TerrainTypes.TERRAIN_DESERT then
+					if Map.Rand(100, "Frosty Desert Hill") < 30 then
+						plot:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
+						n = n + 1;
+					end
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	print("Frosty desert hills added:", n);
 end
 ------------------------------------------------------------------------------
 -- Mirrors AddFrostySnowFingers' own shape, just for Jungle instead of Snow,
