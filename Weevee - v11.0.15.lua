@@ -6950,17 +6950,27 @@ function GenerateTerrain()
 		-- of 28%) and the rest compressed proportionally to still each get a
 		-- real band rather than being squeezed out.
 		--
+		-- Tundra band cut by roughly 30% (0.60-0.38=0.22 wide -> 0.60-0.45=
+		-- 0.15 wide) per the user's request, at the request's own explicit
+		-- boundary (fSnowLatitude unchanged) -- the freed-up space goes to
+		-- Plains, which grows from 0.20 to 0.27 wide.
+		--
 		-- A modest Desert band added near the warm far corner (previously
-		-- fully disabled) -- see AddFeatures' frosty branch for how it's
-		-- meant to interleave with the Jungle band there for a believable
-		-- warm-corner mix instead of a clean either/or split.
+		-- fully disabled), shifted outward from its first pass (was 0.02-
+		-- 0.22) to 0.15-0.30 so Jungle (see AddFeatures' frosty branch) gets
+		-- an uncontested pure core near the corner tip (lat < 0.15) instead
+		-- of the two competing for space from the very first tile out --
+		-- that competition was exactly why Jungle read as sparse/frayed
+		-- rather than a real jungle mass. Desert and Jungle still overlap
+		-- from 0.15-0.30 for a believable mixed warm/dry transition, same
+		-- reasoning as before, just pushed past Jungle's new solid core.
 		args.fSnowLatitude = 0.60;
-		args.fTundraLatitude = 0.38;
+		args.fTundraLatitude = 0.45;
 		args.iDesertPercent = 35;
 		args.iPlainsPercent = 45;
 		args.fGrassLatitude = 0.18;
-		args.fDesertBottomLatitude = 0.02;
-		args.fDesertTopLatitude = 0.22;
+		args.fDesertBottomLatitude = 0.15;
+		args.fDesertTopLatitude = 0.30;
 	elseif cfg ~= nil and (cfg.kind == "tongue" or cfg.kind == "bramble") then
 		args.fSnowLatitude = 1.1;
 		args.fTundraLatitude = 1.1;
@@ -9918,6 +9928,7 @@ function AddFeatures()
 	AddPeaksEconHillFill();
 	AddPeaksRandomForestSpray();
 	AddFrostyCornerIce();
+	AddFrostyJungleCluster();
 	AddBrambleFeatures();
 	ForestMountainsToBareTarget();
 	WeeveeLogFlatHillSample();
@@ -13018,6 +13029,99 @@ function AddFrostyCornerIce()
 		y = y + 1;
 	end
 	print("Frosty corner ice:", n);
+end
+------------------------------------------------------------------------------
+-- Vanilla's own lat-gated, fractal-driven Jungle placement (AddFeatures'
+-- frosty args) reads as sparse and frayed here: the eligible band is a
+-- narrow curved sliver near one corner, nothing like vanilla's usual wide
+-- equatorial band where the fractal's natural blobbiness has room to show,
+-- and the Desert band sharing that same space (see GenerateTerrain's
+-- frosty branch) pre-empts some of what would've been Jungle-topped
+-- Plains before this even runs. Forces a couple of solid, deliberately-
+-- clustered patches within Jungle's uncontested pure core (lat < 0.15,
+-- Desert-free) instead of trusting the fractal alone -- the same "just
+-- grow a real blob" approach already used for Peaky's own inland forests
+-- (PeakGrowForest) rather than a scattered feel. Runs after vanilla's own
+-- AddFeatures/AdjustTerrainTypes, so it explicitly matches vanilla's own
+-- "Jungle sits on Plains" terrain convention itself.
+function AddFrostyJungleCluster()
+	local cfg = GetBarrierConfig();
+	if cfg == nil or cfg.kind ~= "frosty" then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local mirrored = (DEF_MIRRORED == 1);
+	local function eligible(plot)
+		return plot ~= nil
+			and plot:IsWater() == false
+			and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
+			and plot:GetFeatureType() == FeatureTypes.NO_FEATURE
+			and plot:CanHaveFeature(FeatureTypes.FEATURE_JUNGLE)
+			and GetClimateLatitudeAtPlot(plot:GetX(), plot:GetY()) < 0.15;
+	end
+	local candidates = {};
+	local y = 0;
+	while y < iH do
+		local x = 0;
+		while x < iW do
+			if MirrorOwnsPlot(x, y, mirrored, iW) then
+				local plot = Map.GetPlot(x, y);
+				if eligible(plot) then
+					table.insert(candidates, plot);
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	if #candidates < 1 then
+		print("Frosty jungle clusters: 0 (no eligible core tiles)");
+		return
+	end
+	candidates = GetShuffledCopyOfTable(candidates);
+	local nClusters = 2 + Map.Rand(2, "Frosty Jungle Cluster Count");
+	local claimed = {};
+	local function claim(plot)
+		claimed[plot:GetY() * iW + plot:GetX()] = true;
+	end
+	local function isClaimed(plot)
+		return claimed[plot:GetY() * iW + plot:GetX()] == true;
+	end
+	local function plantJungle(plot)
+		plot:SetFeatureType(FeatureTypes.FEATURE_JUNGLE, -1);
+		plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, true);
+		claim(plot);
+	end
+	local nSet = 0;
+	local placed = 0;
+	local ci = 1;
+	while placed < nClusters and ci <= #candidates do
+		local seed = candidates[ci];
+		ci = ci + 1;
+		if isClaimed(seed) == false and seed:GetFeatureType() == FeatureTypes.NO_FEATURE then
+			local target = 5 + Map.Rand(5, "Frosty Jungle Cluster Size");
+			local q = {seed};
+			plantJungle(seed);
+			nSet = nSet + 1;
+			local qi = 1;
+			while qi <= #q and #q < target do
+				local p = q[qi];
+				qi = qi + 1;
+				local d = 0;
+				while d < DirectionTypes.NUM_DIRECTION_TYPES and #q < target do
+					local adj = PlotDirNoXWrap(p:GetX(), p:GetY(), d);
+					if adj ~= nil and isClaimed(adj) == false and eligible(adj) and Map.Rand(100, "Frosty Jungle Cluster Grow") < 75 then
+						plantJungle(adj);
+						table.insert(q, adj);
+						nSet = nSet + 1;
+					end
+					d = d + 1;
+				end
+			end
+			placed = placed + 1;
+		end
+	end
+	print("Frosty jungle clusters:", placed, " tiles:", nSet);
 end
 ------------------------------------------------------------------------------
 function CountMireMountainNeighbors(plot)
