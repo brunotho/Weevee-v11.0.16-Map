@@ -1893,6 +1893,68 @@ function PeakEnsureStartHills(asp)
 	end
 end
 ------------------------------------------------------------------------------
+-- If a spawn has no Forest at all within radius 3, chain-rolls up to three
+-- additions on distinct eligible tiles within that same radius: 85% for the
+-- first, then (only if that one landed) 60% for a second, then (only if
+-- that one also landed) 40% for a third. Stops at the first roll that
+-- fails, so most affected spawns end up with just one or two, not three.
+function PeakEnsureStartForest(asp)
+	local cfg = GetBarrierConfig();
+	if cfg == nil or cfg.kind ~= "peaks" then
+		return
+	end
+	if asp == nil or asp.startingPlots == nil then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local r = 1;
+	while asp.startingPlots[r] ~= nil do
+		local sp = asp.startingPlots[r];
+		local sx = sp[1];
+		local sy = sp[2];
+		local hasForest = false;
+		local cands = {};
+		local y = 0;
+		while y < iH do
+			local x = 0;
+			while x < iW do
+				local d = Map.PlotDistance(sx, sy, x, y);
+				if d >= 1 and d <= 3 then
+					local plot = Map.GetPlot(x, y);
+					if plot ~= nil then
+						if plot:GetFeatureType() == FeatureTypes.FEATURE_FOREST then
+							hasForest = true;
+						elseif plot:IsWater() == false
+							and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
+							and plot:GetFeatureType() == FeatureTypes.NO_FEATURE
+							and plot:CanHaveFeature(FeatureTypes.FEATURE_FOREST) then
+							table.insert(cands, plot);
+						end
+					end
+				end
+				x = x + 1;
+			end
+			y = y + 1;
+		end
+		if hasForest == false and #cands > 0 then
+			cands = GetShuffledCopyOfTable(cands);
+			local chances = {85, 60, 40};
+			local made = 0;
+			local ci = 1;
+			while ci <= #chances and ci <= #cands do
+				if Map.Rand(100, "Peaks Start Forest") >= chances[ci] then
+					break
+				end
+				cands[ci]:SetFeatureType(FeatureTypes.FEATURE_FOREST, -1);
+				made = made + 1;
+				ci = ci + 1;
+			end
+			print("Peaks start forest region", r, " added", made);
+		end
+		r = r + 1;
+	end
+end
+------------------------------------------------------------------------------
 function FrostyTileOnSnow(plot)
 	return plot ~= nil and plot:GetTerrainType() == TerrainTypes.TERRAIN_SNOW;
 end
@@ -9680,6 +9742,7 @@ function AddFeatures()
 	AddPeaksThawRiverTundra();
 	AddPeaksBackCoastForest();
 	AddPeaksEconHillFill();
+	AddPeaksRandomForestSpray();
 	AddFrostyForests();
 	AddFrostySouthJungle();
 	AddFrostyIce();
@@ -16501,6 +16564,47 @@ function AddPeaksEconHillFill()
 	print("Peaks econ hill fill:", n);
 end
 ------------------------------------------------------------------------------
+-- A light, genuinely-random forest sprinkle over whatever's still open
+-- after every other Peaks feature pass has run -- vanilla's own
+-- AddFeatures (and every Peaks-specific pass above) places forest based on
+-- spatially-correlated fractals/clusters, which reads fine most places but
+-- also produces real dead patches of open plains/grass with no forest at
+-- all anywhere in them. This doesn't try to fix that structurally, just
+-- sprays a small independent chance onto individual open tiles to break up
+-- the biggest, most obviously bare patches without meaningfully changing
+-- the map's overall forest density.
+function AddPeaksRandomForestSpray()
+	local cfg = GetBarrierConfig();
+	if cfg == nil or cfg.kind ~= "peaks" then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local skip = FillMireSkip(iW);
+	local mirrored = (DEF_MIRRORED == 1);
+	local n = 0;
+	local y = 0;
+	while y < iH do
+		local x = 0;
+		while x < iW do
+			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
+				local plot = Map.GetPlot(x, y);
+				if plot ~= nil
+					and plot:IsWater() == false
+					and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
+					and plot:GetFeatureType() == FeatureTypes.NO_FEATURE
+					and plot:CanHaveFeature(FeatureTypes.FEATURE_FOREST)
+					and Map.Rand(100, "Peaks Random Forest Spray") < 5 then
+					plot:SetFeatureType(FeatureTypes.FEATURE_FOREST, -1);
+					n = n + 1;
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	print("Peaks random forest spray:", n);
+end
+------------------------------------------------------------------------------
 function PeakAdjGrass(plot)
 	local d = 0;
 	while d < DirectionTypes.NUM_DIRECTION_TYPES do
@@ -18955,6 +19059,7 @@ function StartPlotSystem()
 	start_plot_database:ChooseLocations()
 	WeeveeDbg("ChooseLocations done");
 	WeeveeDbgCall("PeakEnsureStartHills", function() PeakEnsureStartHills(start_plot_database) end);
+	WeeveeDbgCall("PeakEnsureStartForest", function() PeakEnsureStartForest(start_plot_database) end);
 	WeeveeDbgCall("ClampAspStartsOffEdges", function() ClampAspStartsOffEdges(start_plot_database) end);
 	WeeveeDbgCall("OasisSpreadStarts", function() OasisSpreadStarts(start_plot_database) end);
 	WeeveeDbgCall("EnforceMinStartDistance", function() EnforceMinStartDistance(start_plot_database, 7) end);
