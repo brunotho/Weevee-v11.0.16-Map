@@ -169,6 +169,11 @@ local peakMassif = {};
 local peakForestStyle = {};
 local nPeakMassifs = 0;
 local riverEdgeList = {};
+-- Per-tile BFS distance to the nearest water plot (any Ocean/Lake), rebuilt
+-- fresh at the top of every AddRivers() call. Lets GetRiverValueAtPlot bias
+-- toward existing water bodies (back coast, lakes, ponds) over any distance,
+-- not just the single tile of lookahead the base algorithm already had.
+local riverWaterDist = nil;
 
 ------------------------------------------------------------------------------
 function GetResourceSetting()
@@ -1839,6 +1844,54 @@ function AssignStartingPlots:AddStrategicBalanceResources(region_number)
 		pick:SetResourceType(self.iron_ID, iron_amt);
 		self.amounts_of_resources_placed[self.iron_ID + 1] = self.amounts_of_resources_placed[self.iron_ID + 1] + iron_amt;
 		print("Peaks start iron at", pick:GetX(), pick:GetY(), " region", region_number);
+	end
+end
+------------------------------------------------------------------------------
+-- At most 2 Mountains within radius 1 of a spawn -- excess gets demoted
+-- (mostly to Hills, sometimes flat Land) so a capital doesn't end up boxed
+-- in by 3+ of its 6 immediate neighbors being unworkable. Runs before
+-- PeakEnsureStartHills so a demotion straight to Hills can help satisfy
+-- that function's own "at least 2 Hills" floor instead of fighting it.
+function PeakLimitStartMountains(asp)
+	local cfg = GetBarrierConfig();
+	if cfg == nil or cfg.kind ~= "peaks" then
+		return
+	end
+	if asp == nil or asp.startingPlots == nil then
+		return
+	end
+	local maxMountains = 2;
+	local r = 1;
+	while asp.startingPlots[r] ~= nil do
+		local sp = asp.startingPlots[r];
+		local sx = sp[1];
+		local sy = sp[2];
+		local mountains = {};
+		local d = 0;
+		while d < DirectionTypes.NUM_DIRECTION_TYPES do
+			local adj = PlotDirNoXWrap(sx, sy, d);
+			if adj ~= nil and adj:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
+				table.insert(mountains, adj);
+			end
+			d = d + 1;
+		end
+		if #mountains > maxMountains then
+			mountains = GetShuffledCopyOfTable(mountains);
+			local demoted = 0;
+			local i = maxMountains + 1;
+			while i <= #mountains do
+				if Map.Rand(100, "Peaks Start Mountain Demote") < 65 then
+					mountains[i]:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
+				else
+					mountains[i]:SetPlotType(PlotTypes.PLOT_LAND, false, false);
+				end
+				mountains[i]:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+				demoted = demoted + 1;
+				i = i + 1;
+			end
+			print("Peaks start mountains region", r, " had", #mountains, " demoted", demoted);
+		end
+		r = r + 1;
 	end
 end
 ------------------------------------------------------------------------------
@@ -9818,6 +9871,57 @@ function PlotDirNoXWrap(x, y, direction)
 	return p;
 end
 ------------------------------------------------------------------------------
+-- BFS distance (in tiles) from every plot to the nearest water plot,
+-- flood-filled outward from every Ocean/Lake tile on the map. Rebuilt fresh
+-- at the top of every AddRivers() call and read by GetRiverValueAtPlot.
+function BuildRiverWaterDistanceField()
+	local iW, iH = Map.GetGridSize();
+	local INF = 9999;
+	local dist = {};
+	local qx, qy = {}, {};
+	local qn = 0;
+	local y = 0;
+	while y < iH do
+		local x = 0;
+		while x < iW do
+			local i = y * iW + x + 1;
+			dist[i] = INF;
+			local plot = Map.GetPlot(x, y);
+			if plot ~= nil and plot:IsWater() then
+				dist[i] = 0;
+				qn = qn + 1;
+				qx[qn] = x;
+				qy[qn] = y;
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	local qi = 1;
+	while qi <= qn do
+		local cx, cy = qx[qi], qy[qi];
+		local ci = cy * iW + cx + 1;
+		local cd = dist[ci];
+		qi = qi + 1;
+		local d = 0;
+		while d < DirectionTypes.NUM_DIRECTION_TYPES do
+			local adj = PlotDirNoXWrap(cx, cy, d);
+			if adj ~= nil then
+				local ax, ay = adj:GetX(), adj:GetY();
+				local ai = ay * iW + ax + 1;
+				if dist[ai] > cd + 1 then
+					dist[ai] = cd + 1;
+					qn = qn + 1;
+					qx[qn] = ax;
+					qy[qn] = ay;
+				end
+			end
+			d = d + 1;
+		end
+	end
+	return dist;
+end
+------------------------------------------------------------------------------
 -- The west/east barrier strip (RowMireSkip's columns, plus Bramble's own
 -- separator) is normally dry land as far as the river walk is concerned --
 -- ClearRiversNearBarrier only wipes river edges that land inside it well
@@ -9845,6 +9949,20 @@ function GetRiverValueAtPlot(plot)
 	local direction_influence_value = 0;
 	if IsRiverBarrierColumn(x, y) then
 		direction_influence_value = numPlots * 50;
+	end
+	-- Bias toward existing water bodies (back coast, lakes, ponds) at real
+	-- distance, not just the single tile of lookahead the base algorithm
+	-- already had (an adjacent Ocean plot already scores low via the plot-
+	-- type term below, but that does nothing for a river many tiles from
+	-- the nearest water, which previously had no reason to prefer one
+	-- direction over another beyond relative elevation -- it would just
+	-- wander until it happened to hit a hard map edge).
+	if riverWaterDist ~= nil then
+		local iW = Map.GetGridSize();
+		local wd = riverWaterDist[y * iW + x + 1];
+		if wd ~= nil and wd < 9999 then
+			direction_influence_value = direction_influence_value + wd * 3;
+		end
 	end
 
 	local sum = ((numPlots - plot:GetPlotType()) * 20) + direction_influence_value;
@@ -10410,6 +10528,7 @@ function AddRivers()
 	local iW, iH = Map.GetGridSize()
 	print("Skirmish - Adding Rivers");
 	riverEdgeList = {};
+	riverWaterDist = BuildRiverWaterDistanceField();
 	local SplitOps = Map.GetCustomOption(OPT_CENTER_SPLIT)
 	local snowRiverSkipActive = (IsOldSnow() or IsSnowBarrier());
 	local cfgRiversSkip = GetBarrierConfig();
@@ -16015,6 +16134,36 @@ function AddPeaksBackCoastIslands()
 			local footprint = {{seed:GetX(), seed:GetY()}};
 			seed:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
 			seed:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+			-- Mostly a single tile, but sometimes a small 2-3 tile
+			-- mountain-only sliver instead -- still no halo of its own
+			-- (occasionally a token one below), just more than one rock.
+			local sizeRoll = Map.Rand(100, "Peaks BackCoast Splinter Size");
+			local coreTarget = 1;
+			if sizeRoll >= 85 then
+				coreTarget = 3;
+			elseif sizeRoll >= 55 then
+				coreTarget = 2;
+			end
+			local qi = 1;
+			while qi <= #footprint and #footprint < coreTarget do
+				local px, py = footprint[qi][1], footprint[qi][2];
+				local d0 = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Peaks BackCoast Splinter Grow Dir");
+				local k = 0;
+				while k < DirectionTypes.NUM_DIRECTION_TYPES and #footprint < coreTarget do
+					local d = (d0 + k) % DirectionTypes.NUM_DIRECTION_TYPES;
+					k = k + 1;
+					local adj = PlotDirNoXWrap(px, py, d);
+					if adj ~= nil and adj:GetX() <= bandMax and adj:IsWater()
+						and isClaimed(adj:GetX(), adj:GetY()) == false
+						and touchesMainland(adj) == false
+						and Map.Rand(100, "Peaks BackCoast Splinter Grow") < 60 then
+						adj:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
+						adj:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+						table.insert(footprint, {adj:GetX(), adj:GetY()});
+					end
+				end
+				qi = qi + 1;
+			end
 			if Map.Rand(100, "Peaks BackCoast Splinter Halo Chance") < 30 then
 				growHalo(footprint, true, 1);
 			end
@@ -19058,6 +19207,7 @@ function StartPlotSystem()
 	WeeveeDbg("ChooseLocations");
 	start_plot_database:ChooseLocations()
 	WeeveeDbg("ChooseLocations done");
+	WeeveeDbgCall("PeakLimitStartMountains", function() PeakLimitStartMountains(start_plot_database) end);
 	WeeveeDbgCall("PeakEnsureStartHills", function() PeakEnsureStartHills(start_plot_database) end);
 	WeeveeDbgCall("PeakEnsureStartForest", function() PeakEnsureStartForest(start_plot_database) end);
 	WeeveeDbgCall("ClampAspStartsOffEdges", function() ClampAspStartsOffEdges(start_plot_database) end);
