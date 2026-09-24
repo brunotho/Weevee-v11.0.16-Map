@@ -3035,10 +3035,11 @@ local luxWantD = 7;
 local luxWantT = 3;
 -- Must be declared before ResetWeeveeGenState (right below) so its own
 -- reset assignment closes over this same local, not an unrelated global --
--- ResolvePeaksJungleCutoff/IsPeaksJungleLatitude (defined much later, near
--- the Peaks forest functions that use them) close over these same two.
+-- ResolvePeaksJungleBand/IsPeaksJungleLatitude (defined much later, near
+-- the Peaks forest functions that use them) close over these same three.
 local peaksJungleCutoffResolved = false;
-local peaksJungleCutoffY = 0;
+local peaksJungleLowY = 0;
+local peaksJungleHighY = 0;
 function ResetWeeveeGenState()
 	barrierSplitResolved = false;
 	barrierWrapResolved = false;
@@ -3052,6 +3053,8 @@ function ResetWeeveeGenState()
 	luxTargetResolved = false;
 	weeveeStartDistFail = false;
 	peaksJungleCutoffResolved = false;
+	peaksJungleLowY = 0;
+	peaksJungleHighY = 0;
 end
 function ResetWeeveeMapAttempt()
 	local iW, iH = Map.GetGridSize();
@@ -16602,31 +16605,48 @@ function AddPeaksNorthTundra()
 end
 ------------------------------------------------------------------------------
 -- Peaky's Tundra accent (AddPeaksNorthTundra, just above) sits only in the
--- extreme north (the top 3 rows) -- the map has no symmetric south-pole
--- band the way the vanilla latitude model would normally give it, since
--- GenerateTerrain's own peaks branch disables fSnowLatitude/fTundraLatitude
--- entirely and this hand-placed accent is the only source. That leaves the
--- south wide open for a Jungle band, resolved once per generation (not
--- re-rolled per function) so every forest-placement site that checks it
--- agrees on the same boundary: roughly the southern 25% of map height, with
--- some roll-to-roll variance either side. (peaksJungleCutoffResolved/Y
--- themselves are declared up near ResetWeeveeGenState, not here, so that
--- function's own reset assignment closes over these same locals.)
-function ResolvePeaksJungleCutoff()
+-- extreme north (the top 3 rows), hand-placed since GenerateTerrain's own
+-- peaks branch disables fSnowLatitude/fTundraLatitude entirely. But "warm"
+-- on this map is NOT the south edge -- GetClimateLatitudeAtPlot (and the
+-- DLL's own hardcoded CanHaveFeature(FEATURE_JUNGLE) latitude gate, which
+-- this doesn't control) both use abs(iH/2 - y)/(iH/2), so y=0 and y=iH-1
+-- are BOTH cold poles and the actual equator sits at the map's vertical
+-- CENTER. An earlier version of this put the jungle band at y < cutoff
+-- (hugging the south edge) on the mistaken assumption that "south" meant
+-- warm -- that band is the single coldest place on the map by this metric,
+-- so CanHaveFeature(FEATURE_JUNGLE) failed on literally every candidate
+-- there, no matter what terrain we painted. Fixed: the band is now centered
+-- on iH/2, roughly 25% of map height wide with some roll-to-roll variance,
+-- resolved once per generation (not re-rolled per function) so every
+-- forest-placement site that checks it agrees on the same boundary.
+-- (peaksJungleCutoffResolved/LowY/HighY themselves are declared up near
+-- ResetWeeveeGenState, not here, so that function's own reset assignment
+-- closes over these same locals.)
+function ResolvePeaksJungleBand()
 	if peaksJungleCutoffResolved then
-		return peaksJungleCutoffY;
+		return peaksJungleLowY, peaksJungleHighY;
 	end
 	peaksJungleCutoffResolved = true;
 	local iW, iH = Map.GetGridSize();
-	peaksJungleCutoffY = math.floor(iH * 0.25) + Map.Rand(5, "Peaks Jungle Latitude") - 2;
-	if peaksJungleCutoffY < 2 then
-		peaksJungleCutoffY = 2;
+	local half = math.floor(iH * 0.125) + Map.Rand(3, "Peaks Jungle Latitude");
+	if half < 2 then
+		half = 2;
 	end
-	print("Peaks jungle cutoff Y:", peaksJungleCutoffY);
-	return peaksJungleCutoffY;
+	local mid = math.floor(iH / 2);
+	peaksJungleLowY = mid - half;
+	peaksJungleHighY = mid + half;
+	if peaksJungleLowY < 2 then
+		peaksJungleLowY = 2;
+	end
+	if peaksJungleHighY > iH - 3 then
+		peaksJungleHighY = iH - 3;
+	end
+	print("Peaks jungle band Y:", peaksJungleLowY, "-", peaksJungleHighY);
+	return peaksJungleLowY, peaksJungleHighY;
 end
 function IsPeaksJungleLatitude(y)
-	return y < ResolvePeaksJungleCutoff();
+	local lowY, highY = ResolvePeaksJungleBand();
+	return y >= lowY and y <= highY;
 end
 -- Jungle in place of Forest within that southern band, falling back to
 -- Forest if the specific tile can't actually take Jungle (Jungle's terrain
@@ -17379,14 +17399,16 @@ end
 -- AddPeaksMassifForests' own Jungle-band handling ties Jungle placement to
 -- the mountain-massif collar system (peakMassif/peakDist/PeakForestCollarEligible),
 -- which depends on there actually being a massif whose recorded location
--- falls in the band, WITH eligible collar tiles around it -- reported as
--- still producing no visible Jungle at all in practice despite that path
--- being reachable in principle, so this exists as a direct, unconditional
--- guarantee that doesn't depend on the massif system working out at all:
--- scans the whole Jungle band for any eligible flat/hill land (not
--- restricted to being near a mountain) and force-grows a couple of solid
--- patches, the same approach already proven to work for Frosty's own
--- Jungle (AddFrostyJungleFingers).
+-- falls in the band, WITH eligible collar tiles around it. This exists as a
+-- direct, unconditional guarantee that doesn't depend on the massif system
+-- working out at all: scans the whole Jungle band (ResolvePeaksJungleBand,
+-- centered on the map's vertical middle -- see that function's own comment
+-- for why "southern" was the wrong place to look) for any eligible flat/
+-- hill land (not restricted to being near a mountain) and force-grows a
+-- couple of solid patches, the same approach already proven to work for
+-- Frosty's own Jungle (AddFrostyJungleFingers). Name kept as-is even though
+-- the band is no longer literally southern, to avoid an unrelated rename
+-- touching the AddFeatures() call site.
 function AddPeaksSouthernJungle()
 	local cfg = GetBarrierConfig();
 	if cfg == nil or cfg.kind ~= "peaks" then
@@ -17395,7 +17417,7 @@ function AddPeaksSouthernJungle()
 	local iW, iH = Map.GetGridSize();
 	local mirrored = (DEF_MIRRORED == 1);
 	local skip = FillMireSkip(iW);
-	local cutoff = ResolvePeaksJungleCutoff();
+	local lowY, highY = ResolvePeaksJungleBand();
 	local function eligible(plot)
 		return plot ~= nil
 			and plot:IsWater() == false
@@ -17404,8 +17426,8 @@ function AddPeaksSouthernJungle()
 			and plot:CanHaveFeature(FeatureTypes.FEATURE_JUNGLE);
 	end
 	local candidates = {};
-	local y = 0;
-	while y < cutoff do
+	local y = lowY;
+	while y <= highY do
 		local x = 0;
 		while x < iW do
 			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
@@ -17418,7 +17440,7 @@ function AddPeaksSouthernJungle()
 		end
 		y = y + 1;
 	end
-	WeeveeDbgPersist("Peaks southern jungle: cutoff=" .. cutoff .. " candidates=" .. #candidates);
+	WeeveeDbgPersist("Peaks southern jungle: band=" .. lowY .. "-" .. highY .. " candidates=" .. #candidates);
 	if #candidates < 1 then
 		print("Peaks southern jungle: no eligible candidates");
 		return
