@@ -17418,12 +17418,34 @@ function AddPeaksSouthernJungle()
 	local mirrored = (DEF_MIRRORED == 1);
 	local skip = FillMireSkip(iW);
 	local lowY, highY = ResolvePeaksJungleBand();
+	-- Temporary breakdown counters (see WeeveeDbgPersist call below) to
+	-- pin down exactly which eligible() clause is rejecting every tile in
+	-- the band, since a plain candidates=0 wasn't enough to tell whether
+	-- it's water/mountains/existing-features/CanHaveFeature at fault.
+	local nScanned, nWater, nMountain, nFeatured, nFailCanHave, nOk = 0, 0, 0, 0, 0, 0;
 	local function eligible(plot)
-		return plot ~= nil
-			and plot:IsWater() == false
-			and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
-			and plot:GetFeatureType() == FeatureTypes.NO_FEATURE
-			and plot:CanHaveFeature(FeatureTypes.FEATURE_JUNGLE);
+		if plot == nil then
+			return false
+		end
+		nScanned = nScanned + 1;
+		if plot:IsWater() then
+			nWater = nWater + 1;
+			return false
+		end
+		if plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
+			nMountain = nMountain + 1;
+			return false
+		end
+		if plot:GetFeatureType() ~= FeatureTypes.NO_FEATURE then
+			nFeatured = nFeatured + 1;
+			return false
+		end
+		if plot:CanHaveFeature(FeatureTypes.FEATURE_JUNGLE) == false then
+			nFailCanHave = nFailCanHave + 1;
+			return false
+		end
+		nOk = nOk + 1;
+		return true;
 	end
 	local candidates = {};
 	local y = lowY;
@@ -17440,7 +17462,9 @@ function AddPeaksSouthernJungle()
 		end
 		y = y + 1;
 	end
-	WeeveeDbgPersist("Peaks southern jungle: band=" .. lowY .. "-" .. highY .. " candidates=" .. #candidates);
+	WeeveeDbgPersist("Peaks southern jungle: band=" .. lowY .. "-" .. highY .. " candidates=" .. #candidates
+		.. " scanned=" .. nScanned .. " water=" .. nWater .. " mountain=" .. nMountain
+		.. " featured=" .. nFeatured .. " failCanHave=" .. nFailCanHave .. " ok=" .. nOk);
 	if #candidates < 1 then
 		print("Peaks southern jungle: no eligible candidates");
 		return
