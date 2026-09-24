@@ -16049,8 +16049,23 @@ function AddPeaksBackCoastIslands()
 			fi = fi + 1;
 		end
 	end
+	-- True for a candidate exactly one water tile off the mainland (none of
+	-- its own neighbors touch mainland directly, but one of THEIR neighbors
+	-- does) -- the "just a 1-tile gap" position most islands should
+	-- preferentially land on.
+	local function nearMainland(plot)
+		local d = 0;
+		while d < DirectionTypes.NUM_DIRECTION_TYPES do
+			local adj = PlotDirNoXWrap(plot:GetX(), plot:GetY(), d);
+			if adj ~= nil and touchesMainland(adj) then
+				return true
+			end
+			d = d + 1;
+		end
+		return false;
+	end
 	local function gatherCandidates()
-		local cands = {};
+		local near, far = {}, {};
 		local y = 2;
 		while y < iH - 2 do
 			local x = 0;
@@ -16059,14 +16074,35 @@ function AddPeaksBackCoastIslands()
 					local plot = Map.GetPlot(x, y);
 					if plot ~= nil and plot:IsWater() and isClaimed(x, y) == false
 						and touchesMainland(plot) == false and touchesLand(plot) == false then
-						table.insert(cands, plot);
+						if nearMainland(plot) then
+							table.insert(near, plot);
+						else
+							table.insert(far, plot);
+						end
 					end
 				end
 				x = x + 1;
 			end
 			y = y + 1;
 		end
-		return GetShuffledCopyOfTable(cands);
+		-- Near candidates first (each shuffled among themselves) so an
+		-- island almost always lands right off the coast when any such spot
+		-- is still free, falling back to farther-out water only once the
+		-- near ring is used up.
+		near = GetShuffledCopyOfTable(near);
+		far = GetShuffledCopyOfTable(far);
+		local cands = {};
+		local i = 1;
+		while i <= #near do
+			table.insert(cands, near[i]);
+			i = i + 1;
+		end
+		i = 1;
+		while i <= #far do
+			table.insert(cands, far[i]);
+			i = i + 1;
+		end
+		return cands;
 	end
 	-- Small hill/land halo grown from any tile already in the footprint (not
 	-- just the original seed -- a multi-tile massif's own growth often eats
@@ -16151,24 +16187,26 @@ function AddPeaksBackCoastIslands()
 		end
 		return false
 	end
-	-- One proper peak island, always -- then a ~20% chance of a second
+	-- One proper peak island, always -- then a ~75% chance of a second
 	-- chunky island alongside it (peak or plain hill/land massif) so "at
 	-- least one is a peak" is guaranteed by the first regardless of the
-	-- second's roll.
+	-- second's roll. Raised from 20% -- two real islands should be the
+	-- common case, not the exception, per the user's "2 big islands, not 5
+	-- tiny ones" request.
 	local nChunkyPlaced = 0;
 	if placeChunkyIsland(true) then
 		nChunkyPlaced = 1;
-		if Map.Rand(100, "Peaks BackCoast Second Chunky") < 20 then
+		if Map.Rand(100, "Peaks BackCoast Second Chunky") < 75 then
 			if placeChunkyIsland(Map.Rand(100, "Peaks BackCoast Second Chunky Peak") < 55) then
 				nChunkyPlaced = 2;
 			end
 		end
 	end
-	-- A handful of tiny splintered cliffs sprinkled around the same blob --
-	-- mostly bare rock (rarely a token 1-tile halo), distinct from the
-	-- chunky island(s) above and always small enough that
+	-- Just a token sprinkle of tiny splintered cliffs now, not a real
+	-- population of their own -- the chunky island(s) above are meant to be
+	-- the map's actual island presence. Still small enough that
 	-- StripLuxuryOnTinyPeaksIslands will keep them luxury-free.
-	local nSplinterTarget = 3 + Map.Rand(4, "Peaks BackCoast Splinter Count");
+	local nSplinterTarget = 1 + Map.Rand(2, "Peaks BackCoast Splinter Count");
 	local nSplinterPlaced = 0;
 	local candidates = gatherCandidates();
 	local ci = 1;
@@ -16748,9 +16786,19 @@ function AddPeaksEconHillFill()
 			end
 			dy = dy + 1;
 		end
-		if nHill < 3 and #flats > 0 then
-			local pick = flats[Map.Rand(#flats, "Peaks Econ Hill") + 1];
-			pick:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
+		-- Floor raised from 3 to 6 hills per radius-3 disk (37 tiles: ~8% ->
+		-- ~16% minimum density), and now tops up in one pass with a while
+		-- loop instead of adding at most one hill per center per call --
+		-- this is the ONLY general hill mechanism for Peaky's econ zone
+		-- (the starfish fingers off AddPeaksLayout only reach a limited
+		-- distance from an actual massif), so land far from every peak was
+		-- relying entirely on this floor, and the old floor was too weak to
+		-- read as anything but flat out there.
+		while nHill < 6 and #flats > 0 do
+			local idx = Map.Rand(#flats, "Peaks Econ Hill") + 1;
+			flats[idx]:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
+			table.remove(flats, idx);
+			nHill = nHill + 1;
 			n = n + 1;
 		end
 		ci = ci + 1;
