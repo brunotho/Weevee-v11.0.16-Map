@@ -4370,12 +4370,12 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 	-- GenerateTerrain) would otherwise wipe anything placed at the
 	-- plotTypes-array stage right back to flat land.
 	local isPeaks = frostyCfg ~= nil and frostyCfg.kind == "peaks";
-	-- To roughly double the triangle's total surface area, both dimensions
-	-- need to scale by sqrt(2) (~41%), not just one -- doubling only width
-	-- or only height would just double the area on its own (8 -> 12,
-	-- paired with the basePct widening below). Pulled back slightly to 11
-	-- afterward per request.
-	local backMax = isPeaks and 11 or (isFrosty and 7 or 2);
+	-- Depth history: 8 (original) -> 12 (doubled area) -> 11 (pulled back
+	-- slightly) -> 8 now, per request to go noticeably less deep
+	-- horizontally while making up the difference (plus a further ~15%)
+	-- in the basePct vertical extent below, for roughly the same-or-larger
+	-- total area with a much taller, shallower shape.
+	local backMax = isPeaks and 8 or (isFrosty and 7 or 2);
 	-- Per-row random-walk step size: how much depth can jump row to row, not
 	-- just the clamp range it wanders within. Frosty widens this too (see
 	-- below) since a wide min/maxD clamp alone still reads fairly smooth if
@@ -4420,10 +4420,13 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 	-- water ends up deepest, which is naturally right at the middle here.
 	if isPeaks then
 		local midY = (iH - 1) / 2;
-		-- Widened from 25-35% to 35-50% (the other ~41% factor toward
-		-- doubling total area, alongside backMax above), then pulled back
-		-- slightly to 32-46% per request.
-		local basePct = 32 + Map.Rand(15, "Peaks Triangle Base Pct");
+		-- basePct history: 25-35 -> 35-50 (doubled area) -> 32-46 (pulled
+		-- back) -> 50-74 now, paired with backMax's drop to 8 above so the
+		-- shape trades depth for height: (8 * 62avg) is ~15% bigger than
+		-- the previous (11 * 39avg), and the coast now reads as tall and
+		-- shallow -- crawling further down the map edge -- rather than deep
+		-- and squat.
+		local basePct = 50 + Map.Rand(25, "Peaks Triangle Base Pct");
 		local halfBase = (iH * basePct / 100) / 2;
 		if halfBase < 1.5 then
 			halfBase = 1.5;
@@ -13301,31 +13304,61 @@ function AddFrostyPolarMountainRidge()
 	end
 	candidates = GetShuffledCopyOfTable(candidates);
 	local seed = candidates[1];
-	local target = 7 + Map.Rand(6, "Frosty Polar Ridge Size");
-	local q = {seed};
-	seed:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
-	seed:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-	local qi = 1;
-	while qi <= #q and #q < target do
-		local p = q[qi];
-		qi = qi + 1;
-		local d0 = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Frosty Polar Ridge Dir");
-		local k = 0;
-		while k < DirectionTypes.NUM_DIRECTION_TYPES and #q < target do
-			local d = (d0 + k) % DirectionTypes.NUM_DIRECTION_TYPES;
-			k = k + 1;
-			local adj = PlotDirNoXWrap(p:GetX(), p:GetY(), d);
-			if adj ~= nil and skip[adj:GetX()] ~= true and adj:IsWater() == false
-				and adj:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN and PlotIsMajorStart(adj) == false
-				and Map.PlotDistance(cx, cy, adj:GetX(), adj:GetY()) <= radius
-				and Map.Rand(100, "Frosty Polar Ridge Grow") < 72 then
-				adj:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
-				adj:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-				table.insert(q, adj);
+	local function eligible(plot)
+		return plot ~= nil and skip[plot:GetX()] ~= true and plot:IsWater() == false
+			and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN and PlotIsMajorStart(plot) == false
+			and Map.PlotDistance(cx, cy, plot:GetX(), plot:GetY()) <= radius;
+	end
+	local placed = {};
+	local function place(plot)
+		plot:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
+		plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+		table.insert(placed, plot);
+	end
+	place(seed);
+	-- A meandering spine (same idea as Peaky's own starfish hill fingers)
+	-- instead of the old uniform radial BFS blob, which -- expanding from
+	-- every frontier tile in all directions at a flat 72% chance -- always
+	-- read as one compact, fairly round clump. This reads as an actual
+	-- ridge LINE with some real length and a couple of short side-branch
+	-- knobs for texture, not a round blob.
+	local target = 9 + Map.Rand(8, "Frosty Polar Ridge Size");
+	local dir = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Frosty Polar Ridge Dir");
+	local cur = seed;
+	local attempts = 0;
+	while #placed < target and attempts < 300 do
+		attempts = attempts + 1;
+		if Map.Rand(100, "Frosty Polar Ridge Meander") < 45 then
+			local turn = 1;
+			if Map.Rand(2, "Frosty Polar Ridge Turn") == 0 then
+				turn = -1;
+			end
+			dir = (dir + turn) % DirectionTypes.NUM_DIRECTION_TYPES;
+		end
+		local adj = PlotDirNoXWrap(cur:GetX(), cur:GetY(), dir);
+		if adj == nil or eligible(adj) == false then
+			-- Dead end (map edge, radius limit, or already placed) -- jump
+			-- to a random already-placed tile and keep going with a fresh
+			-- direction instead of ending the whole ridge early.
+			cur = placed[1 + Map.Rand(#placed, "Frosty Polar Ridge Jump")];
+			dir = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Frosty Polar Ridge Dir");
+		else
+			place(adj);
+			cur = adj;
+			if #placed < target and Map.Rand(100, "Frosty Polar Ridge Branch Chance") < 25 then
+				local branchTurn = 2;
+				if Map.Rand(2, "Frosty Polar Ridge Branch Side") == 0 then
+					branchTurn = -2;
+				end
+				local branchDir = (dir + branchTurn) % DirectionTypes.NUM_DIRECTION_TYPES;
+				local branch = PlotDirNoXWrap(cur:GetX(), cur:GetY(), branchDir);
+				if branch ~= nil and eligible(branch) then
+					place(branch);
+				end
 			end
 		end
 	end
-	print("Frosty polar mountain ridge:", #q, "tiles");
+	print("Frosty polar mountain ridge:", #placed, "tiles");
 end
 ------------------------------------------------------------------------------
 -- Snow reaching into Tundra as thin, meandering, tapering fingers instead
@@ -16135,7 +16168,7 @@ function AddPeaksBackCoastIslands()
 	local mirrored = (DEF_MIRRORED == 1);
 	-- Must match ShapeNoWrapBackstrip's own peaks backMax so islands can use
 	-- the full carved depth of the coast.
-	local bandMax = 11;
+	local bandMax = 8;
 	local function touchesMainland(plot)
 		local d = 0;
 		while d < DirectionTypes.NUM_DIRECTION_TYPES do
@@ -16289,17 +16322,22 @@ function AddPeaksBackCoastIslands()
 		end
 		return 0
 	end
-	-- A fixed total tile budget spread across however many 1-3 tile islands
-	-- it takes to spend it (sprinkles through small clusters), rather than
-	-- a fixed island count -- replaces the old "one guaranteed chunky peak
-	-- island + a second maybe + a couple of splinters" system entirely per
-	-- request.
+	-- A fixed total tile budget spread across however many islands it takes
+	-- to spend it -- replaces the old "one guaranteed chunky peak island +
+	-- a second maybe + a couple of splinters" system entirely per request.
+	-- Nudged from a 1-3 tile roll (sprinkles through small clusters) to an
+	-- 8-17 tile roll per island: on a 17-tile budget that means just 1-2
+	-- real chunky islands, not a scatter of tiny ones, per follow-up
+	-- request. Candidates are still gathered "near mainland" first (see
+	-- gatherCandidates above), which combined with the coast's shallower
+	-- new depth (backMax 8) is what actually keeps island-to-mainland gaps
+	-- small, not the size roll itself.
 	local budget = 17;
 	local nIslandsPlaced = 0;
 	local attempts = 0;
 	while budget > 0 and attempts < 40 do
 		attempts = attempts + 1;
-		local want = 1 + Map.Rand(3, "Peaks BackCoast Island Size");
+		local want = 8 + Map.Rand(10, "Peaks BackCoast Island Size");
 		if want > budget then
 			want = budget;
 		end
