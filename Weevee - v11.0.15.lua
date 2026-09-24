@@ -3029,6 +3029,12 @@ local luxTargetResolved = false;
 local luxWantU = 15;
 local luxWantD = 7;
 local luxWantT = 3;
+-- Must be declared before ResetWeeveeGenState (right below) so its own
+-- reset assignment closes over this same local, not an unrelated global --
+-- ResolvePeaksJungleCutoff/IsPeaksJungleLatitude (defined much later, near
+-- the Peaks forest functions that use them) close over these same two.
+local peaksJungleCutoffResolved = false;
+local peaksJungleCutoffY = 0;
 function ResetWeeveeGenState()
 	barrierSplitResolved = false;
 	barrierWrapResolved = false;
@@ -3041,6 +3047,7 @@ function ResetWeeveeGenState()
 	murkTundraLakeTiles = {};
 	luxTargetResolved = false;
 	weeveeStartDistFail = false;
+	peaksJungleCutoffResolved = false;
 end
 function ResetWeeveeMapAttempt()
 	local iW, iH = Map.GetGridSize();
@@ -16589,6 +16596,44 @@ function AddPeaksNorthTundra()
 	print("Peaks north tundra:", n);
 end
 ------------------------------------------------------------------------------
+-- Peaky's Tundra accent (AddPeaksNorthTundra, just above) sits only in the
+-- extreme north (the top 3 rows) -- the map has no symmetric south-pole
+-- band the way the vanilla latitude model would normally give it, since
+-- GenerateTerrain's own peaks branch disables fSnowLatitude/fTundraLatitude
+-- entirely and this hand-placed accent is the only source. That leaves the
+-- south wide open for a Jungle band, resolved once per generation (not
+-- re-rolled per function) so every forest-placement site that checks it
+-- agrees on the same boundary: roughly the southern 25% of map height, with
+-- some roll-to-roll variance either side. (peaksJungleCutoffResolved/Y
+-- themselves are declared up near ResetWeeveeGenState, not here, so that
+-- function's own reset assignment closes over these same locals.)
+function ResolvePeaksJungleCutoff()
+	if peaksJungleCutoffResolved then
+		return peaksJungleCutoffY;
+	end
+	peaksJungleCutoffResolved = true;
+	local iW, iH = Map.GetGridSize();
+	peaksJungleCutoffY = math.floor(iH * 0.25) + Map.Rand(5, "Peaks Jungle Latitude") - 2;
+	if peaksJungleCutoffY < 2 then
+		peaksJungleCutoffY = 2;
+	end
+	print("Peaks jungle cutoff Y:", peaksJungleCutoffY);
+	return peaksJungleCutoffY;
+end
+function IsPeaksJungleLatitude(y)
+	return y < ResolvePeaksJungleCutoff();
+end
+-- Jungle in place of Forest within that southern band, falling back to
+-- Forest if the specific tile can't actually take Jungle (Jungle's terrain
+-- rules are stricter than Forest's -- no Desert, for instance -- so this
+-- degrades gracefully instead of silently placing nothing).
+function PeaksForestOrJungleFeature(plot)
+	if IsPeaksJungleLatitude(plot:GetY()) and plot:CanHaveFeature(FeatureTypes.FEATURE_JUNGLE) then
+		return FeatureTypes.FEATURE_JUNGLE;
+	end
+	return FeatureTypes.FEATURE_FOREST;
+end
+------------------------------------------------------------------------------
 function AddPeaksFrontStrayForests()
 	local cfg = GetBarrierConfig();
 	if cfg == nil or cfg.kind ~= "peaks" then
@@ -16636,7 +16681,7 @@ function AddPeaksFrontStrayForests()
 	local n = 0;
 	local i = 1;
 	while i <= nWant do
-		cands[i]:SetFeatureType(FeatureTypes.FEATURE_FOREST, -1);
+		cands[i]:SetFeatureType(PeaksForestOrJungleFeature(cands[i]), -1);
 		n = n + 1;
 		if Map.Rand(100, "Peaks Front Forest Grow") < 40 then
 			local d = 0;
@@ -16644,7 +16689,7 @@ function AddPeaksFrontStrayForests()
 				local adj = PlotDirNoXWrap(cands[i]:GetX(), cands[i]:GetY(), d);
 				if adj ~= nil and adj:IsWater() == false and adj:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
 					if adj:GetFeatureType() == FeatureTypes.NO_FEATURE and skip[adj:GetX()] ~= true then
-						adj:SetFeatureType(FeatureTypes.FEATURE_FOREST, -1);
+						adj:SetFeatureType(PeaksForestOrJungleFeature(adj), -1);
 						n = n + 1;
 						break
 					end
@@ -16706,7 +16751,7 @@ function AddPeaksInteriorStrayForests()
 	local n = 0;
 	local i = 1;
 	while i <= nWant do
-		cands[i]:SetFeatureType(FeatureTypes.FEATURE_FOREST, -1);
+		cands[i]:SetFeatureType(PeaksForestOrJungleFeature(cands[i]), -1);
 		n = n + 1;
 		if Map.Rand(100, "Peaks Interior Forest Grow") < 40 then
 			local d = 0;
@@ -16714,7 +16759,7 @@ function AddPeaksInteriorStrayForests()
 				local adj = PlotDirNoXWrap(cands[i]:GetX(), cands[i]:GetY(), d);
 				if adj ~= nil and adj:IsWater() == false and adj:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
 					if adj:GetFeatureType() == FeatureTypes.NO_FEATURE and skip[adj:GetX()] ~= true then
-						adj:SetFeatureType(FeatureTypes.FEATURE_FOREST, -1);
+						adj:SetFeatureType(PeaksForestOrJungleFeature(adj), -1);
 						n = n + 1;
 						break
 					end
@@ -17010,9 +17055,21 @@ function PeakForestCollarEligible(plot, skip, mirrored, iW, massifId)
 end
 ------------------------------------------------------------------------------
 function PeakGrowForest(seed, target, skip, mirrored, iW, massifId)
+	-- One choice per whole blob (the seed's own latitude), not per tile --
+	-- "the groupings around the mountain peaks entirely replaced with
+	-- jungle at those latitudes", not a forest/jungle mix within one
+	-- massif's own collar. Falls back to Forest tile-by-tile within a
+	-- Jungle-designated blob if a specific spot can't actually take Jungle.
+	local wantJungle = IsPeaksJungleLatitude(seed:GetY());
+	local function blobFeature(plot)
+		if wantJungle and plot:CanHaveFeature(FeatureTypes.FEATURE_JUNGLE) then
+			return FeatureTypes.FEATURE_JUNGLE;
+		end
+		return FeatureTypes.FEATURE_FOREST;
+	end
 	local q = {};
 	table.insert(q, seed);
-	seed:SetFeatureType(FeatureTypes.FEATURE_FOREST, -1);
+	seed:SetFeatureType(blobFeature(seed), -1);
 	local grown = 1;
 	local qi = 1;
 	while qi <= #q and grown < target do
@@ -17024,7 +17081,7 @@ function PeakGrowForest(seed, target, skip, mirrored, iW, massifId)
 			if adj ~= nil and grown < target then
 				if PeakForestCollarEligible(adj, skip, mirrored, iW, massifId) then
 					if Map.Rand(100, "Peaks Forest Blob Grow") < 70 then
-						adj:SetFeatureType(FeatureTypes.FEATURE_FOREST, -1);
+						adj:SetFeatureType(blobFeature(adj), -1);
 						table.insert(q, adj);
 						grown = grown + 1;
 					end
