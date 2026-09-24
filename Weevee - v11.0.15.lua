@@ -4380,21 +4380,48 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 			depth = 3;
 			stepRange = 5;
 		elseif isPeaks then
-			minD = 3;
-			maxD = 7;
-			depth = 5;
+			-- Baseline kept thin (a snaky 1-3 column coastline most of the
+			-- height) rather than the old 3-7 range, which -- since the walk
+			-- only nudges by +/-1 a row and easily lingers near its 7-column
+			-- ceiling for many rows in a row -- regularly read as a single
+			-- big square block of open water 4+ columns deep and just as
+			-- tall. AddPeaksBackCoastIslands' own chunky islands still need
+			-- some proper depth to seed from without immediately merging
+			-- into the mainland, so a handful of short "bulge" runs (see the
+			-- row loop below) punch the depth up to the old range for a few
+			-- rows at a time instead of it being the norm everywhere.
+			minD = 1;
+			maxD = 3;
+			depth = 2;
 			nIslands = 0;
 		end
 	end
+	-- Peaks-only: short, occasional excursions to a much deeper water band
+	-- (the old 5-7 column range), giving AddPeaksBackCoastIslands real
+	-- pockets to seed chunky islands in, while every other row stays within
+	-- the thin minD/maxD clamp above so the coastline reads as compressed/
+	-- snaky rather than one large rectangular patch of water.
+	local bulgeRowsLeft = 0;
 	local y = 0;
 	while y < iH do
+		local rowMinD, rowMaxD = minD, maxD;
+		if isPeaks then
+			if bulgeRowsLeft > 0 then
+				bulgeRowsLeft = bulgeRowsLeft - 1;
+			elseif Map.Rand(100, "Peaks BackCoast Bulge Start") < 8 then
+				bulgeRowsLeft = 2 + Map.Rand(4, "Peaks BackCoast Bulge Length");
+			end
+			if bulgeRowsLeft > 0 then
+				rowMinD, rowMaxD = 5, 7;
+			end
+		end
 		local step = Map.Rand(stepRange, "NoWrap Coast Walk") - math.floor(stepRange / 2);
 		depth = depth + step;
-		if depth < minD then
-			depth = minD;
+		if depth < rowMinD then
+			depth = rowMinD;
 		end
-		if depth > maxD then
-			depth = maxD;
+		if depth > rowMaxD then
+			depth = rowMaxD;
 		end
 		local x = 0;
 		while x <= backMax do
@@ -7244,7 +7271,11 @@ function AddLakes()
 	WeeveeDbg("AddLakes");
 	local numLakesAdded = 0;
 	local iW = Map.GetGridSize();
-	local lakePlotRand = 80;
+	-- Odds a single qualifying tile becomes an isolated 1-tile lake (two
+	-- adjacent tiles both rolling it is how the rarer 2-tile ones happen).
+	-- Raised from 80 (1.25%) to roughly +80% more frequent per the user's
+	-- request for more small lakes to show up.
+	local lakePlotRand = 45;
 	-- AddLakes runs after AddRivers (rivers must be carved first, or DoRiver's
 	-- own IsWater() checks would make them stop short of the coast at the
 	-- first lake -- see the ordering comment on GenerateMap). That means a
