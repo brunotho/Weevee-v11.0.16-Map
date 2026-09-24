@@ -4389,49 +4389,56 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 	end
 	-- Peaks' back coast is built entirely separately from the generic
 	-- random-walk loop below (used by every other climate): a single rough
-	-- triangle standing on the west map edge (its base -- the full height
-	-- of x=0 is always at least a sliver of water) and pointing east toward
-	-- the map's center, deepest at the vertical middle and tapering down to
-	-- a thin sliver at the very top and bottom rows. Replaces the old
-	-- system entirely (both the original 3-7 column random walk, which
-	-- lingered near its ceiling for many rows and read as one big square
-	-- patch of water, and a short-lived bulge variant on top of it) --
-	-- redone from scratch on request rather than tuned further. The
-	-- "rough" part is real per-row jitter around the ideal triangle edge,
-	-- not a perfectly straight diagonal line. AddPeaksBackCoastIslands
-	-- seeds its chunky islands from whatever open water ends up deepest,
-	-- which is naturally the middle third or so of the height here.
+	-- triangle standing on the west map edge, pointing east toward the
+	-- map's center. The triangle's base -- its vertical extent along
+	-- x=0 -- only covers 25-35% of the map's height (centered on the
+	-- vertical middle), not the whole height; rows outside that band are
+	-- plain land, no back-coast water at all. Rows inside the band taper
+	-- from a thin sliver at the band's own top/bottom edges up to full
+	-- depth at the middle. The "rough" part is real per-row jitter around
+	-- the ideal triangle edge, not a perfectly straight diagonal line.
+	-- AddPeaksBackCoastIslands seeds its chunky islands from whatever open
+	-- water ends up deepest, which is naturally right at the middle here.
 	if isPeaks then
 		local midY = (iH - 1) / 2;
-		local halfH = midY;
-		if halfH < 1 then
-			halfH = 1;
+		local basePct = 25 + Map.Rand(11, "Peaks Triangle Base Pct");
+		local halfBase = (iH * basePct / 100) / 2;
+		if halfBase < 1.5 then
+			halfBase = 1.5;
 		end
 		local edgeDepth = 1;
 		local y = 0;
 		while y < iH do
-			local yNorm = math.abs(y - midY) / halfH;
-			if yNorm > 1 then
-				yNorm = 1;
-			end
-			local idealDepth = backMax - (backMax - edgeDepth) * yNorm;
-			local jitter = Map.Rand(5, "Peaks Triangle Jitter") - 2;
-			local rowDepth = math.floor(idealDepth + 0.5) + jitter;
-			if rowDepth < 0 then
-				rowDepth = 0;
-			end
-			if rowDepth > backMax then
-				rowDepth = backMax;
-			end
+			local distFromMid = math.abs(y - midY);
 			local x = 0;
-			while x <= backMax do
-				local i = y * iW + x + 1;
-				if x < rowDepth then
-					plotTypes[i] = PlotTypes.PLOT_OCEAN;
-				elseif x <= backMax - 1 then
-					plotTypes[i] = PlotTypes.PLOT_LAND;
+			if distFromMid > halfBase then
+				while x <= backMax do
+					local i = y * iW + x + 1;
+					if x <= backMax - 1 then
+						plotTypes[i] = PlotTypes.PLOT_LAND;
+					end
+					x = x + 1;
 				end
-				x = x + 1;
+			else
+				local yNorm = distFromMid / halfBase;
+				local idealDepth = backMax - (backMax - edgeDepth) * yNorm;
+				local jitter = Map.Rand(5, "Peaks Triangle Jitter") - 2;
+				local rowDepth = math.floor(idealDepth + 0.5) + jitter;
+				if rowDepth < 0 then
+					rowDepth = 0;
+				end
+				if rowDepth > backMax then
+					rowDepth = backMax;
+				end
+				while x <= backMax do
+					local i = y * iW + x + 1;
+					if x < rowDepth then
+						plotTypes[i] = PlotTypes.PLOT_OCEAN;
+					elseif x <= backMax - 1 then
+						plotTypes[i] = PlotTypes.PLOT_LAND;
+					end
+					x = x + 1;
+				end
 			end
 			y = y + 1;
 		end
