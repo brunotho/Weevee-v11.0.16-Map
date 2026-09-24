@@ -17423,6 +17423,8 @@ function AddPeaksSouthernJungle()
 	-- the band, since a plain candidates=0 wasn't enough to tell whether
 	-- it's water/mountains/existing-features/CanHaveFeature at fault.
 	local nScanned, nWater, nMountain, nFeatured, nFailCanHave, nOk = 0, 0, 0, 0, 0, 0;
+	local failTerrainCounts = {};
+	local failHillCount, failFlatCount = 0, 0;
 	local function eligible(plot)
 		if plot == nil then
 			return false
@@ -17442,6 +17444,13 @@ function AddPeaksSouthernJungle()
 		end
 		if plot:CanHaveFeature(FeatureTypes.FEATURE_JUNGLE) == false then
 			nFailCanHave = nFailCanHave + 1;
+			local t = plot:GetTerrainType();
+			failTerrainCounts[t] = (failTerrainCounts[t] or 0) + 1;
+			if plot:GetPlotType() == PlotTypes.PLOT_HILLS then
+				failHillCount = failHillCount + 1;
+			else
+				failFlatCount = failFlatCount + 1;
+			end
 			return false
 		end
 		nOk = nOk + 1;
@@ -17465,6 +17474,14 @@ function AddPeaksSouthernJungle()
 	WeeveeDbgPersist("Peaks southern jungle: band=" .. lowY .. "-" .. highY .. " candidates=" .. #candidates
 		.. " scanned=" .. nScanned .. " water=" .. nWater .. " mountain=" .. nMountain
 		.. " featured=" .. nFeatured .. " failCanHave=" .. nFailCanHave .. " ok=" .. nOk);
+	if nFailCanHave > 0 then
+		local terrainMsg = "";
+		for t, c in pairs(failTerrainCounts) do
+			terrainMsg = terrainMsg .. " terrain[" .. tostring(t) .. "]=" .. c;
+		end
+		WeeveeDbgPersist("Peaks southern jungle failCanHave breakdown: hill=" .. failHillCount
+			.. " flat=" .. failFlatCount .. terrainMsg);
+	end
 	if #candidates < 1 then
 		print("Peaks southern jungle: no eligible candidates");
 		return
