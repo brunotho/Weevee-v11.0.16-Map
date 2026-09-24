@@ -17065,6 +17065,15 @@ function PeakMeadowEligible(plot, skip, mirrored, iW)
 	if plot:GetTerrainType() ~= TerrainTypes.TERRAIN_PLAINS then
 		return false
 	end
+	-- Without this, a Plains tile that already has Jungle on it (placed by
+	-- AddPeaksMassifForests/AddPeaksSouthernJungle/etc, all of which run
+	-- earlier in AddFeatures' call list) still passed every check above and
+	-- got its terrain flipped to Grass here, leaving the Jungle feature
+	-- intact but sitting on the wrong terrain -- Jungle-on-Grass carries an
+	-- extra food yield that PeaksPlaceJungle exists specifically to avoid.
+	if plot:GetFeatureType() ~= FeatureTypes.NO_FEATURE then
+		return false
+	end
 	return true;
 end
 ------------------------------------------------------------------------------
