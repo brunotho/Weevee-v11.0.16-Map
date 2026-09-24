@@ -16659,8 +16659,9 @@ end
 -- forests, this direct scan) could ever place it once that flatten ran.
 -- Since we're placing hand-authored Jungle here anyway, just convert the
 -- tile to Grass first and retest rather than accepting defeat on the
--- original terrain -- reverts back if Grass doesn't help either (e.g. the
--- plot is otherwise disqualified for a reason unrelated to terrain).
+-- original terrain -- reverts back either way, since this is only a probe
+-- (see PeaksPlaceJungle for the actual placement, which does the same
+-- trick but leaves the conversion in place for the SetFeatureType call).
 function PeaksJungleEligible(plot)
 	if plot == nil then
 		return false
@@ -16673,19 +16674,34 @@ function PeaksJungleEligible(plot)
 		return false
 	end
 	plot:SetTerrainType(TerrainTypes.TERRAIN_GRASS, false, false);
-	if plot:CanHaveFeature(FeatureTypes.FEATURE_JUNGLE) then
-		return true
-	end
+	local ok = plot:CanHaveFeature(FeatureTypes.FEATURE_JUNGLE);
 	plot:SetTerrainType(original, false, false);
-	return false;
+	return ok;
+end
+-- Actually places Jungle on a plot PeaksJungleEligible already approved.
+-- Jungle on Grass gives an extra food yield that isn't wanted here (the
+-- whole reason Peaky's terrain gen leans Plains-heavy in the first place),
+-- so every Jungle tile on Peaky should end up sitting on Plains -- same as
+-- Frosty's own AddFrostyJungleFingers. Flips to Grass only long enough for
+-- SetFeatureType to see a terrain CanHaveFeature actually accepts, then
+-- flips straight back.
+function PeaksPlaceJungle(plot)
+	if plot:CanHaveFeature(FeatureTypes.FEATURE_JUNGLE) == false then
+		plot:SetTerrainType(TerrainTypes.TERRAIN_GRASS, false, false);
+	end
+	plot:SetFeatureType(FeatureTypes.FEATURE_JUNGLE, -1);
+	plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, true);
 end
 -- Jungle in place of Forest within that southern band, falling back to
 -- Forest if the specific tile can't actually take Jungle even as Grass.
-function PeaksForestOrJungleFeature(plot)
+-- Sets the feature directly (rather than returning a type for the caller
+-- to apply) so it can route Jungle through PeaksPlaceJungle above.
+function PeaksSetForestOrJungle(plot)
 	if IsPeaksJungleLatitude(plot:GetY()) and PeaksJungleEligible(plot) then
-		return FeatureTypes.FEATURE_JUNGLE;
+		PeaksPlaceJungle(plot);
+		return
 	end
-	return FeatureTypes.FEATURE_FOREST;
+	plot:SetFeatureType(FeatureTypes.FEATURE_FOREST, -1);
 end
 ------------------------------------------------------------------------------
 function AddPeaksFrontStrayForests()
@@ -16735,7 +16751,7 @@ function AddPeaksFrontStrayForests()
 	local n = 0;
 	local i = 1;
 	while i <= nWant do
-		cands[i]:SetFeatureType(PeaksForestOrJungleFeature(cands[i]), -1);
+		PeaksSetForestOrJungle(cands[i]);
 		n = n + 1;
 		if Map.Rand(100, "Peaks Front Forest Grow") < 40 then
 			local d = 0;
@@ -16743,7 +16759,7 @@ function AddPeaksFrontStrayForests()
 				local adj = PlotDirNoXWrap(cands[i]:GetX(), cands[i]:GetY(), d);
 				if adj ~= nil and adj:IsWater() == false and adj:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
 					if adj:GetFeatureType() == FeatureTypes.NO_FEATURE and skip[adj:GetX()] ~= true then
-						adj:SetFeatureType(PeaksForestOrJungleFeature(adj), -1);
+						PeaksSetForestOrJungle(adj);
 						n = n + 1;
 						break
 					end
@@ -16805,7 +16821,7 @@ function AddPeaksInteriorStrayForests()
 	local n = 0;
 	local i = 1;
 	while i <= nWant do
-		cands[i]:SetFeatureType(PeaksForestOrJungleFeature(cands[i]), -1);
+		PeaksSetForestOrJungle(cands[i]);
 		n = n + 1;
 		if Map.Rand(100, "Peaks Interior Forest Grow") < 40 then
 			local d = 0;
@@ -16813,7 +16829,7 @@ function AddPeaksInteriorStrayForests()
 				local adj = PlotDirNoXWrap(cands[i]:GetX(), cands[i]:GetY(), d);
 				if adj ~= nil and adj:IsWater() == false and adj:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
 					if adj:GetFeatureType() == FeatureTypes.NO_FEATURE and skip[adj:GetX()] ~= true then
-						adj:SetFeatureType(PeaksForestOrJungleFeature(adj), -1);
+						PeaksSetForestOrJungle(adj);
 						n = n + 1;
 						break
 					end
@@ -17115,15 +17131,16 @@ function PeakGrowForest(seed, target, skip, mirrored, iW, massifId)
 	-- massif's own collar. Falls back to Forest tile-by-tile within a
 	-- Jungle-designated blob if a specific spot can't actually take Jungle.
 	local wantJungle = IsPeaksJungleLatitude(seed:GetY());
-	local function blobFeature(plot)
+	local function setBlobFeature(plot)
 		if wantJungle and PeaksJungleEligible(plot) then
-			return FeatureTypes.FEATURE_JUNGLE;
+			PeaksPlaceJungle(plot);
+			return
 		end
-		return FeatureTypes.FEATURE_FOREST;
+		plot:SetFeatureType(FeatureTypes.FEATURE_FOREST, -1);
 	end
 	local q = {};
 	table.insert(q, seed);
-	seed:SetFeatureType(blobFeature(seed), -1);
+	setBlobFeature(seed);
 	local grown = 1;
 	local qi = 1;
 	while qi <= #q and grown < target do
@@ -17135,7 +17152,7 @@ function PeakGrowForest(seed, target, skip, mirrored, iW, massifId)
 			if adj ~= nil and grown < target then
 				if PeakForestCollarEligible(adj, skip, mirrored, iW, massifId) then
 					if Map.Rand(100, "Peaks Forest Blob Grow") < 70 then
-						adj:SetFeatureType(blobFeature(adj), -1);
+						setBlobFeature(adj);
 						table.insert(q, adj);
 						grown = grown + 1;
 					end
@@ -17486,8 +17503,7 @@ function AddPeaksSouthernJungle()
 		return claimed[plot:GetY() * iW + plot:GetX()] == true;
 	end
 	local function plant(plot)
-		plot:SetFeatureType(FeatureTypes.FEATURE_JUNGLE, -1);
-		plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, true);
+		PeaksPlaceJungle(plot);
 		claim(plot);
 	end
 	candidates = GetShuffledCopyOfTable(candidates);
