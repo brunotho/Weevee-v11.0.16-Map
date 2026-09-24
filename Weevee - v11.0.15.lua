@@ -1896,8 +1896,12 @@ function PeakLimitStartMountains()
 	if cfg == nil or cfg.kind ~= "peaks" then
 		return
 	end
-	local maxMountains = 2;
+	local maxProblems = 2;
 	local mirrored = (DEF_MIRRORED == 1);
+	-- Mountains and lake tiles now share the same ring-1 cap (saltwater is
+	-- already disallowed adjacent to a capital elsewhere, so this only ever
+	-- has to worry about lakes, not the ocean).
+	local anyLakeRemoved = false;
 	local pi = 0;
 	while pi < GameDefines.MAX_MAJOR_CIVS do
 		local player = Players[pi];
@@ -1905,34 +1909,44 @@ function PeakLimitStartMountains()
 			local sp = player:GetStartingPlot();
 			if sp ~= nil and (mirrored == false or IsMirrorEastSubject(sp:GetX(), sp:GetY()) == false) then
 				local sx, sy = sp:GetX(), sp:GetY();
-				local mountains = {};
+				local problems = {};
 				local d = 0;
 				while d < DirectionTypes.NUM_DIRECTION_TYPES do
 					local adj = PlotDirNoXWrap(sx, sy, d);
-					if adj ~= nil and adj:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
-						table.insert(mountains, adj);
+					if adj ~= nil and (adj:GetPlotType() == PlotTypes.PLOT_MOUNTAIN or adj:IsLake()) then
+						table.insert(problems, adj);
 					end
 					d = d + 1;
 				end
-				if #mountains > maxMountains then
-					mountains = GetShuffledCopyOfTable(mountains);
+				if #problems > maxProblems then
+					problems = GetShuffledCopyOfTable(problems);
 					local demoted = 0;
-					local i = maxMountains + 1;
-					while i <= #mountains do
-						if Map.Rand(100, "Peaks Start Mountain Demote") < 65 then
-							mountains[i]:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
+					local i = maxProblems + 1;
+					while i <= #problems do
+						local plot = problems[i];
+						if plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
+							if Map.Rand(100, "Peaks Start Mountain Demote") < 65 then
+								plot:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
+							else
+								plot:SetPlotType(PlotTypes.PLOT_LAND, false, false);
+							end
 						else
-							mountains[i]:SetPlotType(PlotTypes.PLOT_LAND, false, false);
+							plot:SetArea(-1);
+							plot:SetPlotType(PlotTypes.PLOT_LAND, false, false);
+							anyLakeRemoved = true;
 						end
-						mountains[i]:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+						plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
 						demoted = demoted + 1;
 						i = i + 1;
 					end
-					print("Peaks start mountains player", pi, " had", #mountains, " demoted", demoted);
+					print("Peaks start mountains/lakes player", pi, " had", #problems, " demoted", demoted);
 				end
 			end
 		end
 		pi = pi + 1;
+	end
+	if anyLakeRemoved then
+		Map.CalculateAreas();
 	end
 end
 ------------------------------------------------------------------------------
