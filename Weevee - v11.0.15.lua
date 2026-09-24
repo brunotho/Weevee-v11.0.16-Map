@@ -480,12 +480,16 @@ function ResolveSaltWaterPlan()
 			-- compact corner blob instead of a long thin stretch the full
 			-- height of the back coast -- room for one proper peak-island
 			-- plus a handful of splinters, not a scatter of tiny islets
-			-- stretched the whole way up the map. 26-41% (down from the
-			-- original 60-75%, then 35-50%) keeps growing the blob's kept
-			-- height -- this step is another ~15% more surface area on top
-			-- of the previous version -- while still varying per roll
-			-- instead of pinning one fixed size/shape.
-			saltCutPct = 26 + Map.Rand(16, "Peaks BackCoast Cut");
+			-- stretched the whole way up the map. Range shifted up from
+			-- 26-41% to 37-52% -- the back coast had grown too large
+			-- overall, and since the ceiling case is set by the LOWEST
+			-- cutPct in the range (lower cutPct = more kept height = a
+			-- bigger blob), raising the floor from 26 to 37 cuts the
+			-- ceiling's kept height by ~15% ((100-37)/(100-26) = 0.851)
+			-- while shifting the whole range up by the same amount so the
+			-- roll-to-roll spread/shape stays the same, not just the worst
+			-- (biggest) case.
+			saltCutPct = 37 + Map.Rand(16, "Peaks BackCoast Cut");
 			saltNSeas = 0;
 		elseif cfg ~= nil and cfg.kind == "frosty" then
 			-- The generic 50/50 split (cutPct 25 or 50, picked once per
@@ -10048,6 +10052,7 @@ function AddFeatures()
 	AddMireFeatures();
 	AddNorthIceArms();
 	AddPeaksMassifForests();
+	AddPeaksSouthernJungle();
 	AddPeaksFrontStrayForests();
 	AddPeaksInteriorStrayForests();
 	AddPeaksMeadows();
@@ -17369,6 +17374,100 @@ function AddPeaksMassifForests()
 		id = id + 1;
 	end
 	print("Peaks forest blobs:", nBlob, " tiles:", nTiles);
+end
+------------------------------------------------------------------------------
+-- AddPeaksMassifForests' own Jungle-band handling ties Jungle placement to
+-- the mountain-massif collar system (peakMassif/peakDist/PeakForestCollarEligible),
+-- which depends on there actually being a massif whose recorded location
+-- falls in the band, WITH eligible collar tiles around it -- reported as
+-- still producing no visible Jungle at all in practice despite that path
+-- being reachable in principle, so this exists as a direct, unconditional
+-- guarantee that doesn't depend on the massif system working out at all:
+-- scans the whole Jungle band for any eligible flat/hill land (not
+-- restricted to being near a mountain) and force-grows a couple of solid
+-- patches, the same approach already proven to work for Frosty's own
+-- Jungle (AddFrostyJungleFingers).
+function AddPeaksSouthernJungle()
+	local cfg = GetBarrierConfig();
+	if cfg == nil or cfg.kind ~= "peaks" then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local mirrored = (DEF_MIRRORED == 1);
+	local skip = FillMireSkip(iW);
+	local cutoff = ResolvePeaksJungleCutoff();
+	local function eligible(plot)
+		return plot ~= nil
+			and plot:IsWater() == false
+			and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
+			and plot:GetFeatureType() == FeatureTypes.NO_FEATURE
+			and plot:CanHaveFeature(FeatureTypes.FEATURE_JUNGLE);
+	end
+	local candidates = {};
+	local y = 0;
+	while y < cutoff do
+		local x = 0;
+		while x < iW do
+			if skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW) then
+				local plot = Map.GetPlot(x, y);
+				if eligible(plot) then
+					table.insert(candidates, plot);
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	WeeveeDbgPersist("Peaks southern jungle: cutoff=" .. cutoff .. " candidates=" .. #candidates);
+	if #candidates < 1 then
+		print("Peaks southern jungle: no eligible candidates");
+		return
+	end
+	local claimed = {};
+	local function claim(plot)
+		claimed[plot:GetY() * iW + plot:GetX()] = true;
+	end
+	local function isClaimed(plot)
+		return claimed[plot:GetY() * iW + plot:GetX()] == true;
+	end
+	local function plant(plot)
+		plot:SetFeatureType(FeatureTypes.FEATURE_JUNGLE, -1);
+		plot:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, true);
+		claim(plot);
+	end
+	candidates = GetShuffledCopyOfTable(candidates);
+	local nPatches = 2 + Map.Rand(3, "Peaks Southern Jungle Patch Count");
+	local placed = 0;
+	local ci = 1;
+	while placed < nPatches and ci <= #candidates do
+		local seed = candidates[ci];
+		ci = ci + 1;
+		if isClaimed(seed) == false and seed:GetFeatureType() == FeatureTypes.NO_FEATURE then
+			local target = 6 + Map.Rand(6, "Peaks Southern Jungle Size");
+			local q = {seed};
+			plant(seed);
+			local qi = 1;
+			while qi <= #q and #q < target do
+				local p = q[qi];
+				qi = qi + 1;
+				local d0 = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Peaks Southern Jungle Grow Dir");
+				local k = 0;
+				while k < DirectionTypes.NUM_DIRECTION_TYPES and #q < target do
+					local d = (d0 + k) % DirectionTypes.NUM_DIRECTION_TYPES;
+					k = k + 1;
+					local adj = PlotDirNoXWrap(p:GetX(), p:GetY(), d);
+					if adj ~= nil and isClaimed(adj) == false and eligible(adj) and adj:GetY() < cutoff
+						and Map.Rand(100, "Peaks Southern Jungle Grow") < 70 then
+						plant(adj);
+						table.insert(q, adj);
+					end
+				end
+			end
+			placed = placed + 1;
+		end
+	end
+	print("Peaks southern jungle patches:", placed, "/", nPatches);
+	WeeveeDbgPersist("Peaks southern jungle: patches=" .. placed .. "/" .. nPatches);
 end
 ------------------------------------------------------------------------------
 function AddPeaksBackCoastForest()
