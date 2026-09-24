@@ -17296,11 +17296,40 @@ function AddPeaksMassifForests()
 	local iW, iH = Map.GetGridSize();
 	local skip = FillMireSkip(iW);
 	local mirrored = (DEF_MIRRORED == 1);
+	-- A massif's own forestStyle==3 roll (~28% of massifs) is what normally
+	-- decides whether it gets a big blob at all. Only recoloring that
+	-- existing rare trigger to Jungle within the southern band (as PeakGrowForest
+	-- does per-blob) would mean actually SEEING any jungle needed a massif to
+	-- both land in that band (~25% of rows) AND happen to roll style 3 -- a
+	-- compounded rare event that read as "no jungle at all" in practice.
+	-- Every massif whose own location falls in the Jungle band now always
+	-- gets a blob (guaranteed Jungle, per PeakGrowForest's own latitude
+	-- check) regardless of its forestStyle roll, on top of the unchanged
+	-- style-3 trigger everywhere else.
+	local massifY = {};
+	local y = 0;
+	while y < iH do
+		local x = 0;
+		while x < iW do
+			if MirrorOwnsPlot(x, y, mirrored, iW) then
+				local plot = Map.GetPlot(x, y);
+				if plot ~= nil and plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
+					local mid = peakMassif[y * iW + x + 1];
+					if mid ~= nil and massifY[mid] == nil then
+						massifY[mid] = y;
+					end
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
 	local nBlob = 0;
 	local nTiles = 0;
 	local id = 1;
 	while id <= nPeakMassifs do
-		if peakForestStyle[id] == 3 then
+		local inJungleBand = massifY[id] ~= nil and IsPeaksJungleLatitude(massifY[id]);
+		if peakForestStyle[id] == 3 or inJungleBand then
 			local seeds = {};
 			local y = 0;
 			while y < iH do
