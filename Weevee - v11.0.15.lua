@@ -16648,12 +16648,41 @@ function IsPeaksJungleLatitude(y)
 	local lowY, highY = ResolvePeaksJungleBand();
 	return y >= lowY and y <= highY;
 end
+-- Diagnostics (see AddPeaksSouthernJungle's breakdown logging) confirmed
+-- CanHaveFeature(FEATURE_JUNGLE) was failing on every single candidate in
+-- the jungle band, and every one of them was Plains terrain -- AddPeaksLayout's
+-- own flatten pass (the starfish-finger rewrite) unconditionally stamps
+-- every non-mountain, non-water land tile across the WHOLE map to Plains,
+-- regardless of distance from any massif, wiping out whatever Grass the
+-- TerrainGenerator originally painted. This ruleset's Jungle apparently
+-- can't take root on Plains at all, so nothing downstream (massif collar
+-- forests, this direct scan) could ever place it once that flatten ran.
+-- Since we're placing hand-authored Jungle here anyway, just convert the
+-- tile to Grass first and retest rather than accepting defeat on the
+-- original terrain -- reverts back if Grass doesn't help either (e.g. the
+-- plot is otherwise disqualified for a reason unrelated to terrain).
+function PeaksJungleEligible(plot)
+	if plot == nil then
+		return false
+	end
+	if plot:CanHaveFeature(FeatureTypes.FEATURE_JUNGLE) then
+		return true
+	end
+	local original = plot:GetTerrainType();
+	if original == TerrainTypes.TERRAIN_GRASS then
+		return false
+	end
+	plot:SetTerrainType(TerrainTypes.TERRAIN_GRASS, false, false);
+	if plot:CanHaveFeature(FeatureTypes.FEATURE_JUNGLE) then
+		return true
+	end
+	plot:SetTerrainType(original, false, false);
+	return false;
+end
 -- Jungle in place of Forest within that southern band, falling back to
--- Forest if the specific tile can't actually take Jungle (Jungle's terrain
--- rules are stricter than Forest's -- no Desert, for instance -- so this
--- degrades gracefully instead of silently placing nothing).
+-- Forest if the specific tile can't actually take Jungle even as Grass.
 function PeaksForestOrJungleFeature(plot)
-	if IsPeaksJungleLatitude(plot:GetY()) and plot:CanHaveFeature(FeatureTypes.FEATURE_JUNGLE) then
+	if IsPeaksJungleLatitude(plot:GetY()) and PeaksJungleEligible(plot) then
 		return FeatureTypes.FEATURE_JUNGLE;
 	end
 	return FeatureTypes.FEATURE_FOREST;
@@ -17087,7 +17116,7 @@ function PeakGrowForest(seed, target, skip, mirrored, iW, massifId)
 	-- Jungle-designated blob if a specific spot can't actually take Jungle.
 	local wantJungle = IsPeaksJungleLatitude(seed:GetY());
 	local function blobFeature(plot)
-		if wantJungle and plot:CanHaveFeature(FeatureTypes.FEATURE_JUNGLE) then
+		if wantJungle and PeaksJungleEligible(plot) then
 			return FeatureTypes.FEATURE_JUNGLE;
 		end
 		return FeatureTypes.FEATURE_FOREST;
@@ -17418,43 +17447,16 @@ function AddPeaksSouthernJungle()
 	local mirrored = (DEF_MIRRORED == 1);
 	local skip = FillMireSkip(iW);
 	local lowY, highY = ResolvePeaksJungleBand();
-	-- Temporary breakdown counters (see WeeveeDbgPersist call below) to
-	-- pin down exactly which eligible() clause is rejecting every tile in
-	-- the band, since a plain candidates=0 wasn't enough to tell whether
-	-- it's water/mountains/existing-features/CanHaveFeature at fault.
-	local nScanned, nWater, nMountain, nFeatured, nFailCanHave, nOk = 0, 0, 0, 0, 0, 0;
-	local failTerrainCounts = {};
-	local failHillCount, failFlatCount = 0, 0;
+	-- Routes through PeaksJungleEligible (not a raw CanHaveFeature check) --
+	-- see that function's comment: AddPeaksLayout's flatten pass stamps
+	-- every land tile in the zone to Plains, which this ruleset's Jungle
+	-- can't take root on, so this needs to try converting to Grass first.
 	local function eligible(plot)
-		if plot == nil then
-			return false
-		end
-		nScanned = nScanned + 1;
-		if plot:IsWater() then
-			nWater = nWater + 1;
-			return false
-		end
-		if plot:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
-			nMountain = nMountain + 1;
-			return false
-		end
-		if plot:GetFeatureType() ~= FeatureTypes.NO_FEATURE then
-			nFeatured = nFeatured + 1;
-			return false
-		end
-		if plot:CanHaveFeature(FeatureTypes.FEATURE_JUNGLE) == false then
-			nFailCanHave = nFailCanHave + 1;
-			local t = plot:GetTerrainType();
-			failTerrainCounts[t] = (failTerrainCounts[t] or 0) + 1;
-			if plot:GetPlotType() == PlotTypes.PLOT_HILLS then
-				failHillCount = failHillCount + 1;
-			else
-				failFlatCount = failFlatCount + 1;
-			end
-			return false
-		end
-		nOk = nOk + 1;
-		return true;
+		return plot ~= nil
+			and plot:IsWater() == false
+			and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
+			and plot:GetFeatureType() == FeatureTypes.NO_FEATURE
+			and PeaksJungleEligible(plot);
 	end
 	local candidates = {};
 	local y = lowY;
@@ -17471,17 +17473,7 @@ function AddPeaksSouthernJungle()
 		end
 		y = y + 1;
 	end
-	WeeveeDbgPersist("Peaks southern jungle: band=" .. lowY .. "-" .. highY .. " candidates=" .. #candidates
-		.. " scanned=" .. nScanned .. " water=" .. nWater .. " mountain=" .. nMountain
-		.. " featured=" .. nFeatured .. " failCanHave=" .. nFailCanHave .. " ok=" .. nOk);
-	if nFailCanHave > 0 then
-		local terrainMsg = "";
-		for t, c in pairs(failTerrainCounts) do
-			terrainMsg = terrainMsg .. " terrain[" .. tostring(t) .. "]=" .. c;
-		end
-		WeeveeDbgPersist("Peaks southern jungle failCanHave breakdown: hill=" .. failHillCount
-			.. " flat=" .. failFlatCount .. terrainMsg);
-	end
+	WeeveeDbgPersist("Peaks southern jungle: band=" .. lowY .. "-" .. highY .. " candidates=" .. #candidates);
 	if #candidates < 1 then
 		print("Peaks southern jungle: no eligible candidates");
 		return
@@ -17519,7 +17511,8 @@ function AddPeaksSouthernJungle()
 					local d = (d0 + k) % DirectionTypes.NUM_DIRECTION_TYPES;
 					k = k + 1;
 					local adj = PlotDirNoXWrap(p:GetX(), p:GetY(), d);
-					if adj ~= nil and isClaimed(adj) == false and eligible(adj) and adj:GetY() < cutoff
+					if adj ~= nil and isClaimed(adj) == false and eligible(adj)
+						and adj:GetY() >= lowY and adj:GetY() <= highY
 						and Map.Rand(100, "Peaks Southern Jungle Grow") < 70 then
 						plant(adj);
 						table.insert(q, adj);
