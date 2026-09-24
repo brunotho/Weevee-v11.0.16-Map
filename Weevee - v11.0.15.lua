@@ -8980,6 +8980,31 @@ function EnsureRegionalLuxuryTarget(asp)
 		end
 		return false
 	end
+	-- The generic "ripple 1 for every luxury outside the near-capital ring"
+	-- rule (AssignStartingPlots:PlaceSpecificNumberOfResources' impact-2
+	-- bump) only ever applies to vanilla's own placement calls -- this
+	-- entire function bypasses that machinery too (same reasoning as
+	-- tooCloseToSame just above, which only ever covered the SAME
+	-- resource), so a forced copy of one luxury could still land directly
+	-- next to a completely different luxury with nothing to stop it. Checks
+	-- only the 6 immediate neighbors (not the candidate tile itself, which
+	-- an occupiedCands eviction target legitimately already holds a
+	-- different luxury on -- that's the tile being overwritten, not an
+	-- adjacent one) for any other Weevee luxury type.
+	local function adjacentToOtherLuxury(x, y, resID)
+		local d = 0;
+		while d < DirectionTypes.NUM_DIRECTION_TYPES do
+			local adj = PlotDirNoXWrap(x, y, d);
+			if adj ~= nil then
+				local r = adj:GetResourceType(-1);
+				if r ~= -1 and r ~= resID and IsWeeveeLuxuryID(r) then
+					return true
+				end
+			end
+			d = d + 1;
+		end
+		return false
+	end
 	local counts = {};
 	local y = 0;
 	while y < iH do
@@ -9070,6 +9095,7 @@ function EnsureRegionalLuxuryTarget(asp)
 						and inBarrier(xx, yy) == false
 						and nearAnyCapital(xx, yy, neighborBuf) == false
 						and tooCloseToSame(xx, yy, resID, 2) == false
+						and adjacentToOtherLuxury(xx, yy, resID) == false
 						and plot:CanHaveResource(resID) then
 						local existingRes = plot:GetResourceType(-1);
 						if existingRes == -1 then
@@ -9267,7 +9293,8 @@ function EnsureRegionalLuxuryTarget(asp)
 						and PlotIsMajorStart(plot) == false
 						and inBarrier(xx, yy) == false
 						and nearAnyCapital(xx, yy, neighborBuf) == false
-						and tooCloseToSame(xx, yy, resID, 2) == false then
+						and tooCloseToSame(xx, yy, resID, 2) == false
+						and adjacentToOtherLuxury(xx, yy, resID) == false then
 						local existingRes = plot:GetResourceType(-1);
 						if existingRes == -1 then
 							table.insert(emptyCands, plot);
@@ -9342,7 +9369,8 @@ function EnsureRegionalLuxuryTarget(asp)
 						and PlotIsMajorStart(plot) == false
 						and inBarrier(xx, yy) == false
 						and nearAnyCapital(xx, yy, neighborBuf) == false
-						and tooCloseToSame(xx, yy, resID, 2) == false then
+						and tooCloseToSame(xx, yy, resID, 2) == false
+						and adjacentToOtherLuxury(xx, yy, resID) == false then
 						local existingRes = plot:GetResourceType(-1);
 						if existingRes == -1 then
 							table.insert(emptyCands, plot);
