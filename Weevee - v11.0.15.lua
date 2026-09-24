@@ -1874,97 +1874,115 @@ end
 -- in by 3+ of its 6 immediate neighbors being unworkable. Runs before
 -- PeakEnsureStartHills so a demotion straight to Hills can help satisfy
 -- that function's own "at least 2 Hills" floor instead of fighting it.
-function PeakLimitStartMountains(asp)
+--
+-- Reads Players[]:GetStartingPlot() rather than asp.startingPlots, and
+-- runs late in StartPlotSystem (right before EnsureRegionalLuxuryTarget),
+-- not right after ChooseLocations -- a first version read asp.startingPlots
+-- immediately after ChooseLocations, but ClampAspStartsOffEdges,
+-- BalanceAndAssign, and two full rounds of ClampPlayerStartsOffEdges/
+-- NudgePlayerStartsMinDist all run afterward and can still relocate a
+-- start (the Clamp/Nudge pair calls Players[i]:SetStartingPlot() directly,
+-- never touching asp.startingPlots again), so a start that moved after
+-- this ran could land somewhere with 3+ Mountains that was never checked
+-- -- exactly the bug an in-game reroll caught. Same fix applied to
+-- PeakEnsureStartHills/PeakEnsureStartForest below, which had the
+-- identical structural gap even though only this one was reported broken.
+function PeakLimitStartMountains()
 	local cfg = GetBarrierConfig();
 	if cfg == nil or cfg.kind ~= "peaks" then
-		return
-	end
-	if asp == nil or asp.startingPlots == nil then
 		return
 	end
 	local maxMountains = 2;
-	local r = 1;
-	while asp.startingPlots[r] ~= nil do
-		local sp = asp.startingPlots[r];
-		local sx = sp[1];
-		local sy = sp[2];
-		local mountains = {};
-		local d = 0;
-		while d < DirectionTypes.NUM_DIRECTION_TYPES do
-			local adj = PlotDirNoXWrap(sx, sy, d);
-			if adj ~= nil and adj:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
-				table.insert(mountains, adj);
-			end
-			d = d + 1;
-		end
-		if #mountains > maxMountains then
-			mountains = GetShuffledCopyOfTable(mountains);
-			local demoted = 0;
-			local i = maxMountains + 1;
-			while i <= #mountains do
-				if Map.Rand(100, "Peaks Start Mountain Demote") < 65 then
-					mountains[i]:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
-				else
-					mountains[i]:SetPlotType(PlotTypes.PLOT_LAND, false, false);
+	local mirrored = (DEF_MIRRORED == 1);
+	local pi = 0;
+	while pi < GameDefines.MAX_MAJOR_CIVS do
+		local player = Players[pi];
+		if player ~= nil and player:IsAlive() then
+			local sp = player:GetStartingPlot();
+			if sp ~= nil and (mirrored == false or IsMirrorEastSubject(sp:GetX(), sp:GetY()) == false) then
+				local sx, sy = sp:GetX(), sp:GetY();
+				local mountains = {};
+				local d = 0;
+				while d < DirectionTypes.NUM_DIRECTION_TYPES do
+					local adj = PlotDirNoXWrap(sx, sy, d);
+					if adj ~= nil and adj:GetPlotType() == PlotTypes.PLOT_MOUNTAIN then
+						table.insert(mountains, adj);
+					end
+					d = d + 1;
 				end
-				mountains[i]:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-				demoted = demoted + 1;
-				i = i + 1;
+				if #mountains > maxMountains then
+					mountains = GetShuffledCopyOfTable(mountains);
+					local demoted = 0;
+					local i = maxMountains + 1;
+					while i <= #mountains do
+						if Map.Rand(100, "Peaks Start Mountain Demote") < 65 then
+							mountains[i]:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
+						else
+							mountains[i]:SetPlotType(PlotTypes.PLOT_LAND, false, false);
+						end
+						mountains[i]:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+						demoted = demoted + 1;
+						i = i + 1;
+					end
+					print("Peaks start mountains player", pi, " had", #mountains, " demoted", demoted);
+				end
 			end
-			print("Peaks start mountains region", r, " had", #mountains, " demoted", demoted);
 		end
-		r = r + 1;
+		pi = pi + 1;
 	end
 end
 ------------------------------------------------------------------------------
-function PeakEnsureStartHills(asp)
+function PeakEnsureStartHills()
 	local cfg = GetBarrierConfig();
 	if cfg == nil or cfg.kind ~= "peaks" then
 		return
 	end
-	if asp == nil or asp.startingPlots == nil then
-		return
-	end
 	local iW, iH = Map.GetGridSize();
-	local r = 1;
-	while asp.startingPlots[r] ~= nil do
-		local sp = asp.startingPlots[r];
-		local sx = sp[1];
-		local sy = sp[2];
-		local nHill = 0;
-		local flats = {};
-		local y = 0;
-		while y < iH do
-			local x = 0;
-			while x < iW do
-				local d = Map.PlotDistance(sx, sy, x, y);
-				if d >= 1 and d <= 2 then
-					local plot = Map.GetPlot(x, y);
-					if plot ~= nil and plot:IsWater() == false and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
-						if plot:GetPlotType() == PlotTypes.PLOT_HILLS then
-							nHill = nHill + 1;
-						elseif plot:GetPlotType() == PlotTypes.PLOT_LAND then
-							table.insert(flats, plot);
+	local mirrored = (DEF_MIRRORED == 1);
+	local pi = 0;
+	while pi < GameDefines.MAX_MAJOR_CIVS do
+		local player = Players[pi];
+		local sp = nil;
+		if player ~= nil and player:IsAlive() then
+			sp = player:GetStartingPlot();
+		end
+		if sp ~= nil and (mirrored == false or IsMirrorEastSubject(sp:GetX(), sp:GetY()) == false) then
+			local sx, sy = sp:GetX(), sp:GetY();
+			local nHill = 0;
+			local flats = {};
+			local y = 0;
+			while y < iH do
+				local x = 0;
+				while x < iW do
+					local d = Map.PlotDistance(sx, sy, x, y);
+					if d >= 1 and d <= 2 then
+						local plot = Map.GetPlot(x, y);
+						if plot ~= nil and plot:IsWater() == false and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN then
+							if plot:GetPlotType() == PlotTypes.PLOT_HILLS then
+								nHill = nHill + 1;
+							elseif plot:GetPlotType() == PlotTypes.PLOT_LAND then
+								table.insert(flats, plot);
+							end
 						end
 					end
+					x = x + 1;
 				end
-				x = x + 1;
+				y = y + 1;
 			end
-			y = y + 1;
-		end
-		if nHill < 2 then
-			flats = GetShuffledCopyOfTable(flats);
-			local need = 2 - nHill;
-			local i = 1;
-			local made = 0;
-			while made < need and i <= #flats do
-				flats[i]:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
-				made = made + 1;
-				i = i + 1;
+			if nHill < 2 then
+				flats = GetShuffledCopyOfTable(flats);
+				local need = 2 - nHill;
+				local i = 1;
+				local made = 0;
+				while made < need and i <= #flats do
+					flats[i]:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
+					made = made + 1;
+					i = i + 1;
+				end
+				print("Peaks start hills player", pi, " had", nHill, " added", made);
 			end
-			print("Peaks start hills region", r, " had", nHill, " added", made);
 		end
-		r = r + 1;
+		pi = pi + 1;
 	end
 end
 ------------------------------------------------------------------------------
@@ -1973,60 +1991,63 @@ end
 -- first, then (only if that one landed) 60% for a second, then (only if
 -- that one also landed) 40% for a third. Stops at the first roll that
 -- fails, so most affected spawns end up with just one or two, not three.
-function PeakEnsureStartForest(asp)
+function PeakEnsureStartForest()
 	local cfg = GetBarrierConfig();
 	if cfg == nil or cfg.kind ~= "peaks" then
 		return
 	end
-	if asp == nil or asp.startingPlots == nil then
-		return
-	end
 	local iW, iH = Map.GetGridSize();
-	local r = 1;
-	while asp.startingPlots[r] ~= nil do
-		local sp = asp.startingPlots[r];
-		local sx = sp[1];
-		local sy = sp[2];
-		local hasForest = false;
-		local cands = {};
-		local y = 0;
-		while y < iH do
-			local x = 0;
-			while x < iW do
-				local d = Map.PlotDistance(sx, sy, x, y);
-				if d >= 1 and d <= 3 then
-					local plot = Map.GetPlot(x, y);
-					if plot ~= nil then
-						if plot:GetFeatureType() == FeatureTypes.FEATURE_FOREST then
-							hasForest = true;
-						elseif plot:IsWater() == false
-							and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
-							and plot:GetFeatureType() == FeatureTypes.NO_FEATURE
-							and plot:CanHaveFeature(FeatureTypes.FEATURE_FOREST) then
-							table.insert(cands, plot);
+	local mirrored = (DEF_MIRRORED == 1);
+	local pi = 0;
+	while pi < GameDefines.MAX_MAJOR_CIVS do
+		local player = Players[pi];
+		local sp = nil;
+		if player ~= nil and player:IsAlive() then
+			sp = player:GetStartingPlot();
+		end
+		if sp ~= nil and (mirrored == false or IsMirrorEastSubject(sp:GetX(), sp:GetY()) == false) then
+			local sx, sy = sp:GetX(), sp:GetY();
+			local hasForest = false;
+			local cands = {};
+			local y = 0;
+			while y < iH do
+				local x = 0;
+				while x < iW do
+					local d = Map.PlotDistance(sx, sy, x, y);
+					if d >= 1 and d <= 3 then
+						local plot = Map.GetPlot(x, y);
+						if plot ~= nil then
+							if plot:GetFeatureType() == FeatureTypes.FEATURE_FOREST then
+								hasForest = true;
+							elseif plot:IsWater() == false
+								and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
+								and plot:GetFeatureType() == FeatureTypes.NO_FEATURE
+								and plot:CanHaveFeature(FeatureTypes.FEATURE_FOREST) then
+								table.insert(cands, plot);
+							end
 						end
 					end
+					x = x + 1;
 				end
-				x = x + 1;
+				y = y + 1;
 			end
-			y = y + 1;
-		end
-		if hasForest == false and #cands > 0 then
-			cands = GetShuffledCopyOfTable(cands);
-			local chances = {85, 60, 40};
-			local made = 0;
-			local ci = 1;
-			while ci <= #chances and ci <= #cands do
-				if Map.Rand(100, "Peaks Start Forest") >= chances[ci] then
-					break
+			if hasForest == false and #cands > 0 then
+				cands = GetShuffledCopyOfTable(cands);
+				local chances = {85, 60, 40};
+				local made = 0;
+				local ci = 1;
+				while ci <= #chances and ci <= #cands do
+					if Map.Rand(100, "Peaks Start Forest") >= chances[ci] then
+						break
+					end
+					cands[ci]:SetFeatureType(FeatureTypes.FEATURE_FOREST, -1);
+					made = made + 1;
+					ci = ci + 1;
 				end
-				cands[ci]:SetFeatureType(FeatureTypes.FEATURE_FOREST, -1);
-				made = made + 1;
-				ci = ci + 1;
+				print("Peaks start forest player", pi, " added", made);
 			end
-			print("Peaks start forest region", r, " added", made);
 		end
-		r = r + 1;
+		pi = pi + 1;
 	end
 end
 ------------------------------------------------------------------------------
@@ -19322,9 +19343,6 @@ function StartPlotSystem()
 	WeeveeDbg("ChooseLocations");
 	start_plot_database:ChooseLocations()
 	WeeveeDbg("ChooseLocations done");
-	WeeveeDbgCall("PeakLimitStartMountains", function() PeakLimitStartMountains(start_plot_database) end);
-	WeeveeDbgCall("PeakEnsureStartHills", function() PeakEnsureStartHills(start_plot_database) end);
-	WeeveeDbgCall("PeakEnsureStartForest", function() PeakEnsureStartForest(start_plot_database) end);
 	WeeveeDbgCall("ClampAspStartsOffEdges", function() ClampAspStartsOffEdges(start_plot_database) end);
 	WeeveeDbgCall("OasisSpreadStarts", function() OasisSpreadStarts(start_plot_database) end);
 	WeeveeDbgCall("EnforceMinStartDistance", function() EnforceMinStartDistance(start_plot_database, 7) end);
@@ -19438,6 +19456,17 @@ function StartPlotSystem()
 	WeeveeDbgCall("NudgePlayerStartsMinDist", function() NudgePlayerStartsMinDist(7) end);
 	WeeveeDbgCall("StripNonBonusStartTileResources", StripNonBonusStartTileResources);
 	WeeveeDbgCall("FrostyThawStartResources", FrostyThawStartResources);
+	-- Read Players[]:GetStartingPlot() now, not asp.startingPlots right
+	-- after ChooseLocations -- ClampAspStartsOffEdges, BalanceAndAssign, and
+	-- two full rounds of ClampPlayerStartsOffEdges/NudgePlayerStartsMinDist
+	-- (both above) can all still relocate a start before this point, and
+	-- none of them touch asp.startingPlots again once BalanceAndAssign
+	-- hands starts off to actual players. This is the same "everything that
+	-- can still move a start has already run" point EnsureRegionalLuxuryTarget
+	-- itself relies on right below.
+	WeeveeDbgCall("PeakLimitStartMountains", PeakLimitStartMountains);
+	WeeveeDbgCall("PeakEnsureStartHills", PeakEnsureStartHills);
+	WeeveeDbgCall("PeakEnsureStartForest", PeakEnsureStartForest);
 	WeeveeDbgCall("EnsureRegionalLuxuryTarget", function() EnsureRegionalLuxuryTarget(start_plot_database) end);
 	WeeveeDbgCall("EnsureLuxuryQuota-postRegionalForce", EnsureLuxuryQuota);
 	WeeveeDbgCall("TrimLuxuryQuotaExcess", function() TrimLuxuryQuotaExcess(start_plot_database) end);
