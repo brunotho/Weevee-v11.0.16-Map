@@ -4372,9 +4372,10 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 	local isPeaks = frostyCfg ~= nil and frostyCfg.kind == "peaks";
 	-- To roughly double the triangle's total surface area, both dimensions
 	-- need to scale by sqrt(2) (~41%), not just one -- doubling only width
-	-- or only height would just double the area on its own. 8 -> 12 here,
-	-- paired with the basePct widening below.
-	local backMax = isPeaks and 12 or (isFrosty and 7 or 2);
+	-- or only height would just double the area on its own (8 -> 12,
+	-- paired with the basePct widening below). Pulled back slightly to 11
+	-- afterward per request.
+	local backMax = isPeaks and 11 or (isFrosty and 7 or 2);
 	-- Per-row random-walk step size: how much depth can jump row to row, not
 	-- just the clamp range it wanders within. Frosty widens this too (see
 	-- below) since a wide min/maxD clamp alone still reads fairly smooth if
@@ -4420,8 +4421,9 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 	if isPeaks then
 		local midY = (iH - 1) / 2;
 		-- Widened from 25-35% to 35-50% (the other ~41% factor toward
-		-- doubling total area, alongside backMax above).
-		local basePct = 35 + Map.Rand(16, "Peaks Triangle Base Pct");
+		-- doubling total area, alongside backMax above), then pulled back
+		-- slightly to 32-46% per request.
+		local basePct = 32 + Map.Rand(15, "Peaks Triangle Base Pct");
 		local halfBase = (iH * basePct / 100) / 2;
 		if halfBase < 1.5 then
 			halfBase = 1.5;
@@ -16133,7 +16135,7 @@ function AddPeaksBackCoastIslands()
 	local mirrored = (DEF_MIRRORED == 1);
 	-- Must match ShapeNoWrapBackstrip's own peaks backMax so islands can use
 	-- the full carved depth of the coast.
-	local bandMax = 12;
+	local bandMax = 11;
 	local function touchesMainland(plot)
 		local d = 0;
 		while d < DirectionTypes.NUM_DIRECTION_TYPES do
@@ -16231,157 +16233,85 @@ function AddPeaksBackCoastIslands()
 		end
 		return cands;
 	end
-	-- Small hill/land halo grown from any tile already in the footprint (not
-	-- just the original seed -- a multi-tile massif's own growth often eats
-	-- the seed's own neighbors, so trying every member gives a much better
-	-- chance of actually reaching haloTarget), matching the inland massifs'
-	-- own collar vibe instead of reading as a bare rock.
-	local function growHalo(footprint, isPeak, haloTarget)
-		local haloGrown = 0;
-		local qi = 1;
-		while qi <= #footprint and haloGrown < haloTarget do
-			local px, py = footprint[qi][1], footprint[qi][2];
-			local d0 = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Peaks BackCoast Island Halo Dir");
-			local k = 0;
-			while k < DirectionTypes.NUM_DIRECTION_TYPES and haloGrown < haloTarget do
-				local d = (d0 + k) % DirectionTypes.NUM_DIRECTION_TYPES;
-				k = k + 1;
-				local adj = PlotDirNoXWrap(px, py, d);
-				if adj ~= nil and adj:GetX() <= bandMax and adj:IsWater()
-					and isClaimed(adj:GetX(), adj:GetY()) == false
-					and touchesMainland(adj) == false then
-					if isPeak and Map.Rand(2, "Peaks BackCoast Island Halo Type") == 0 then
-						adj:SetPlotType(PlotTypes.PLOT_HILLS, false, false);
-					else
-						adj:SetPlotType(PlotTypes.PLOT_LAND, false, false);
-					end
-					adj:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-					table.insert(footprint, {adj:GetX(), adj:GetY()});
-					haloGrown = haloGrown + 1;
-				end
-			end
-			qi = qi + 1;
+	-- Per-tile plot type for anything placed by the budget system below:
+	-- 90% Hill or Mountain (split evenly), 10% flat Land, rolled once per
+	-- tile rather than once per island so a size-2/3 island can still come
+	-- out mixed instead of uniform.
+	local function rollIslandPlotType()
+		local r = Map.Rand(100, "Peaks BackCoast Island Tile Type");
+		if r < 10 then
+			return PlotTypes.PLOT_LAND;
+		elseif r < 55 then
+			return PlotTypes.PLOT_HILLS;
+		else
+			return PlotTypes.PLOT_MOUNTAIN;
 		end
 	end
-	-- A "chunky" island: a small connected massif (3-5 tiles, mountain if
-	-- isPeak else hills) plus a halo topped up until the footprint has at
-	-- least 3 non-Mountain tiles total, so it reliably counts as chunky (see
-	-- StripLuxuryOnTinyPeaksIslands) and stays luxury-eligible regardless of
-	-- how the core/halo split landed.
-	local function placeChunkyIsland(isPeak)
+	-- Grows one island of exactly `size` tiles (1 = a single-tile sprinkle,
+	-- 2-3 = a small connected cluster) from the first free candidate,
+	-- returning how many tiles it actually placed (can be less than `size`
+	-- if growth runs out of eligible neighbors). No separate "core" vs
+	-- "halo" concept any more -- every tile in the island rolls its own
+	-- plot type independently via rollIslandPlotType.
+	local function placeIsland(size)
 		local candidates = gatherCandidates();
 		local ci = 1;
 		while ci <= #candidates do
 			local seed = candidates[ci];
 			ci = ci + 1;
 			if seed:IsWater() and isClaimed(seed:GetX(), seed:GetY()) == false then
-				local target = 3 + Map.Rand(3, "Peaks BackCoast Chunky Island Size");
-				local corePlotType = isPeak and PlotTypes.PLOT_MOUNTAIN or PlotTypes.PLOT_HILLS;
 				local footprint = {{seed:GetX(), seed:GetY()}};
-				seed:SetPlotType(corePlotType, false, false);
+				seed:SetPlotType(rollIslandPlotType(), false, false);
 				seed:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
 				local qi = 1;
-				while qi <= #footprint and #footprint < target do
+				while qi <= #footprint and #footprint < size do
 					local px, py = footprint[qi][1], footprint[qi][2];
-					local d0 = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Peaks BackCoast Chunky Island Grow Dir");
+					local d0 = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Peaks BackCoast Island Grow Dir");
 					local k = 0;
-					while k < DirectionTypes.NUM_DIRECTION_TYPES and #footprint < target do
+					while k < DirectionTypes.NUM_DIRECTION_TYPES and #footprint < size do
 						local d = (d0 + k) % DirectionTypes.NUM_DIRECTION_TYPES;
 						k = k + 1;
 						local adj = PlotDirNoXWrap(px, py, d);
 						if adj ~= nil and adj:GetX() <= bandMax and adj:IsWater()
 							and isClaimed(adj:GetX(), adj:GetY()) == false
 							and touchesMainland(adj) == false
-							and Map.Rand(100, "Peaks BackCoast Chunky Island Grow") < 70 then
-							adj:SetPlotType(corePlotType, false, false);
+							and Map.Rand(100, "Peaks BackCoast Island Grow") < 70 then
+							adj:SetPlotType(rollIslandPlotType(), false, false);
 							adj:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
 							table.insert(footprint, {adj:GetX(), adj:GetY()});
 						end
 					end
 					qi = qi + 1;
 				end
-				-- Non-Mountain tiles must reach at least the Mountain count
-				-- (a 50/50 split at worst, land the majority otherwise), not
-				-- just a flat floor of 3 -- a bigger mountain core needs a
-				-- bigger halo to match.
-				local mountainCount = isPeak and #footprint or 0;
-				local nonMountain = #footprint - mountainCount;
-				local haloFloor = math.max(0, mountainCount - nonMountain);
-				growHalo(footprint, isPeak, haloFloor + Map.Rand(2, "Peaks BackCoast Chunky Island Halo"));
 				claimWithMoat(footprint);
-				return true
+				return #footprint
 			end
 		end
-		return false
+		return 0
 	end
-	-- One proper peak island, always -- then a ~75% chance of a second
-	-- chunky island alongside it (peak or plain hill/land massif) so "at
-	-- least one is a peak" is guaranteed by the first regardless of the
-	-- second's roll. Raised from 20% -- two real islands should be the
-	-- common case, not the exception, per the user's "2 big islands, not 5
-	-- tiny ones" request.
-	local nChunkyPlaced = 0;
-	if placeChunkyIsland(true) then
-		nChunkyPlaced = 1;
-		if Map.Rand(100, "Peaks BackCoast Second Chunky") < 75 then
-			if placeChunkyIsland(Map.Rand(100, "Peaks BackCoast Second Chunky Peak") < 55) then
-				nChunkyPlaced = 2;
-			end
+	-- A fixed total tile budget spread across however many 1-3 tile islands
+	-- it takes to spend it (sprinkles through small clusters), rather than
+	-- a fixed island count -- replaces the old "one guaranteed chunky peak
+	-- island + a second maybe + a couple of splinters" system entirely per
+	-- request.
+	local budget = 17;
+	local nIslandsPlaced = 0;
+	local attempts = 0;
+	while budget > 0 and attempts < 40 do
+		attempts = attempts + 1;
+		local want = 1 + Map.Rand(3, "Peaks BackCoast Island Size");
+		if want > budget then
+			want = budget;
+		end
+		local placed = placeIsland(want);
+		if placed > 0 then
+			budget = budget - placed;
+			nIslandsPlaced = nIslandsPlaced + 1;
+		else
+			break
 		end
 	end
-	-- Just a token sprinkle of tiny splintered cliffs now, not a real
-	-- population of their own -- the chunky island(s) above are meant to be
-	-- the map's actual island presence. Still small enough that
-	-- StripLuxuryOnTinyPeaksIslands will keep them luxury-free.
-	local nSplinterTarget = 1 + Map.Rand(2, "Peaks BackCoast Splinter Count");
-	local nSplinterPlaced = 0;
-	local candidates = gatherCandidates();
-	local ci = 1;
-	while nSplinterPlaced < nSplinterTarget and ci <= #candidates do
-		local seed = candidates[ci];
-		ci = ci + 1;
-		if seed:IsWater() and isClaimed(seed:GetX(), seed:GetY()) == false then
-			local footprint = {{seed:GetX(), seed:GetY()}};
-			seed:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
-			seed:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-			-- Mostly a single tile, but sometimes a small 2-3 tile
-			-- mountain-only sliver instead -- still no halo of its own
-			-- (occasionally a token one below), just more than one rock.
-			local sizeRoll = Map.Rand(100, "Peaks BackCoast Splinter Size");
-			local coreTarget = 1;
-			if sizeRoll >= 85 then
-				coreTarget = 3;
-			elseif sizeRoll >= 55 then
-				coreTarget = 2;
-			end
-			local qi = 1;
-			while qi <= #footprint and #footprint < coreTarget do
-				local px, py = footprint[qi][1], footprint[qi][2];
-				local d0 = Map.Rand(DirectionTypes.NUM_DIRECTION_TYPES, "Peaks BackCoast Splinter Grow Dir");
-				local k = 0;
-				while k < DirectionTypes.NUM_DIRECTION_TYPES and #footprint < coreTarget do
-					local d = (d0 + k) % DirectionTypes.NUM_DIRECTION_TYPES;
-					k = k + 1;
-					local adj = PlotDirNoXWrap(px, py, d);
-					if adj ~= nil and adj:GetX() <= bandMax and adj:IsWater()
-						and isClaimed(adj:GetX(), adj:GetY()) == false
-						and touchesMainland(adj) == false
-						and Map.Rand(100, "Peaks BackCoast Splinter Grow") < 60 then
-						adj:SetPlotType(PlotTypes.PLOT_MOUNTAIN, false, false);
-						adj:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
-						table.insert(footprint, {adj:GetX(), adj:GetY()});
-					end
-				end
-				qi = qi + 1;
-			end
-			if Map.Rand(100, "Peaks BackCoast Splinter Halo Chance") < 30 then
-				growHalo(footprint, true, 1);
-			end
-			claimWithMoat(footprint);
-			nSplinterPlaced = nSplinterPlaced + 1;
-		end
-	end
-	print("Peaks back-coast islands: chunky=", nChunkyPlaced, " splinters=", nSplinterPlaced, "/", nSplinterTarget);
+	print("Peaks back-coast islands: tiles placed=", 17 - budget, " islands=", nIslandsPlaced);
 end
 ------------------------------------------------------------------------------
 function AddPeaksRainShadowDesert()
