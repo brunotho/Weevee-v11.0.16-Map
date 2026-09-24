@@ -4380,48 +4380,71 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 			depth = 3;
 			stepRange = 5;
 		elseif isPeaks then
-			-- Baseline kept thin (a snaky 1-3 column coastline most of the
-			-- height) rather than the old 3-7 range, which -- since the walk
-			-- only nudges by +/-1 a row and easily lingers near its 7-column
-			-- ceiling for many rows in a row -- regularly read as a single
-			-- big square block of open water 4+ columns deep and just as
-			-- tall. AddPeaksBackCoastIslands' own chunky islands still need
-			-- some proper depth to seed from without immediately merging
-			-- into the mainland, so a handful of short "bulge" runs (see the
-			-- row loop below) punch the depth up to the old range for a few
-			-- rows at a time instead of it being the norm everywhere.
-			minD = 1;
-			maxD = 3;
-			depth = 2;
+			-- The old per-tile island scatter below (nIslands) is bypassed
+			-- entirely for Peaks -- AddPeaksBackCoastIslands does all real
+			-- island placement once terrain has settled (see the comment
+			-- above the triangle-shape block).
 			nIslands = 0;
 		end
 	end
-	-- Peaks-only: short, occasional excursions to a much deeper water band
-	-- (the old 5-7 column range), giving AddPeaksBackCoastIslands real
-	-- pockets to seed chunky islands in, while every other row stays within
-	-- the thin minD/maxD clamp above so the coastline reads as compressed/
-	-- snaky rather than one large rectangular patch of water.
-	local bulgeRowsLeft = 0;
-	local y = 0;
-	while y < iH do
-		local rowMinD, rowMaxD = minD, maxD;
-		if isPeaks then
-			if bulgeRowsLeft > 0 then
-				bulgeRowsLeft = bulgeRowsLeft - 1;
-			elseif Map.Rand(100, "Peaks BackCoast Bulge Start") < 8 then
-				bulgeRowsLeft = 2 + Map.Rand(4, "Peaks BackCoast Bulge Length");
-			end
-			if bulgeRowsLeft > 0 then
-				rowMinD, rowMaxD = 5, 7;
-			end
+	-- Peaks' back coast is built entirely separately from the generic
+	-- random-walk loop below (used by every other climate): a single rough
+	-- triangle standing on the west map edge (its base -- the full height
+	-- of x=0 is always at least a sliver of water) and pointing east toward
+	-- the map's center, deepest at the vertical middle and tapering down to
+	-- a thin sliver at the very top and bottom rows. Replaces the old
+	-- system entirely (both the original 3-7 column random walk, which
+	-- lingered near its ceiling for many rows and read as one big square
+	-- patch of water, and a short-lived bulge variant on top of it) --
+	-- redone from scratch on request rather than tuned further. The
+	-- "rough" part is real per-row jitter around the ideal triangle edge,
+	-- not a perfectly straight diagonal line. AddPeaksBackCoastIslands
+	-- seeds its chunky islands from whatever open water ends up deepest,
+	-- which is naturally the middle third or so of the height here.
+	if isPeaks then
+		local midY = (iH - 1) / 2;
+		local halfH = midY;
+		if halfH < 1 then
+			halfH = 1;
 		end
+		local edgeDepth = 1;
+		local y = 0;
+		while y < iH do
+			local yNorm = math.abs(y - midY) / halfH;
+			if yNorm > 1 then
+				yNorm = 1;
+			end
+			local idealDepth = backMax - (backMax - edgeDepth) * yNorm;
+			local jitter = Map.Rand(5, "Peaks Triangle Jitter") - 2;
+			local rowDepth = math.floor(idealDepth + 0.5) + jitter;
+			if rowDepth < 0 then
+				rowDepth = 0;
+			end
+			if rowDepth > backMax then
+				rowDepth = backMax;
+			end
+			local x = 0;
+			while x <= backMax do
+				local i = y * iW + x + 1;
+				if x < rowDepth then
+					plotTypes[i] = PlotTypes.PLOT_OCEAN;
+				elseif x <= backMax - 1 then
+					plotTypes[i] = PlotTypes.PLOT_LAND;
+				end
+				x = x + 1;
+			end
+			y = y + 1;
+		end
+	end
+	local y = 0;
+	while isPeaks == false and y < iH do
 		local step = Map.Rand(stepRange, "NoWrap Coast Walk") - math.floor(stepRange / 2);
 		depth = depth + step;
-		if depth < rowMinD then
-			depth = rowMinD;
+		if depth < minD then
+			depth = minD;
 		end
-		if depth > rowMaxD then
-			depth = rowMaxD;
+		if depth > maxD then
+			depth = maxD;
 		end
 		local x = 0;
 		while x <= backMax do
@@ -4450,16 +4473,14 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 			winY0 = iH - keepH;
 			winY1 = iH;
 		elseif isPeaks then
-			-- Anchored to a north or south corner rather than floating
-			-- anywhere along the height -- a "west, north or south corner"
-			-- blob instead of a strip that could land centered on the coast.
-			if Map.Rand(2, "Peaks BackCoast Corner") == 0 then
-				winY0 = 0;
-				winY1 = keepH;
-			else
-				winY0 = iH - keepH;
-				winY1 = iH;
-			end
+			-- No corner crop for Peaks any more -- the triangle shape above
+			-- already fully controls the vertical extent (deepest at the
+			-- middle, tapering to a sliver at both ends), so cutPct's roll
+			-- just goes unused here rather than wiping out the triangle's
+			-- own mid-height apex the way the old corner-anchored window
+			-- would have.
+			winY0 = 0;
+			winY1 = iH;
 		else
 			if iH > keepH then
 				winY0 = Map.Rand(iH - keepH + 1, "Explo back coast window");
@@ -4551,12 +4572,17 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 			end
 		end
 	end
-	y = 0;
-	while y < iH do
-		if y >= winY0 and y < winY1 then
-			plotTypes[y * iW + 1] = PlotTypes.PLOT_OCEAN;
+	-- Skipped for Peaks: forcing x=1 to Ocean across the whole height would
+	-- thicken the triangle's tapered tips (meant to be a thin x=0-only
+	-- sliver near y=0/y=iH-1) right back out again.
+	if isPeaks == false then
+		y = 0;
+		while y < iH do
+			if y >= winY0 and y < winY1 then
+				plotTypes[y * iW + 1] = PlotTypes.PLOT_OCEAN;
+			end
+			y = y + 1;
 		end
-		y = y + 1;
 	end
 	if isFrosty then
 		local fromNorth = 3 + Map.Rand(4, "Frosty Fjord FromNorth");
