@@ -4356,7 +4356,11 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 	-- GenerateTerrain) would otherwise wipe anything placed at the
 	-- plotTypes-array stage right back to flat land.
 	local isPeaks = frostyCfg ~= nil and frostyCfg.kind == "peaks";
-	local backMax = isPeaks and 8 or (isFrosty and 7 or 2);
+	-- To roughly double the triangle's total surface area, both dimensions
+	-- need to scale by sqrt(2) (~41%), not just one -- doubling only width
+	-- or only height would just double the area on its own. 8 -> 12 here,
+	-- paired with the basePct widening below.
+	local backMax = isPeaks and 12 or (isFrosty and 7 or 2);
 	-- Per-row random-walk step size: how much depth can jump row to row, not
 	-- just the clamp range it wanders within. Frosty widens this too (see
 	-- below) since a wide min/maxD clamp alone still reads fairly smooth if
@@ -4401,7 +4405,9 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 	-- water ends up deepest, which is naturally right at the middle here.
 	if isPeaks then
 		local midY = (iH - 1) / 2;
-		local basePct = 25 + Map.Rand(11, "Peaks Triangle Base Pct");
+		-- Widened from 25-35% to 35-50% (the other ~41% factor toward
+		-- doubling total area, alongside backMax above).
+		local basePct = 35 + Map.Rand(16, "Peaks Triangle Base Pct");
 		local halfBase = (iH * basePct / 100) / 2;
 		if halfBase < 1.5 then
 			halfBase = 1.5;
@@ -16113,7 +16119,7 @@ function AddPeaksBackCoastIslands()
 	local mirrored = (DEF_MIRRORED == 1);
 	-- Must match ShapeNoWrapBackstrip's own peaks backMax so islands can use
 	-- the full carved depth of the coast.
-	local bandMax = 8;
+	local bandMax = 12;
 	local function touchesMainland(plot)
 		local d = 0;
 		while d < DirectionTypes.NUM_DIRECTION_TYPES do
