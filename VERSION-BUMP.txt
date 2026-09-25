@@ -4,10 +4,31 @@ Weevee version bump
 When the user says to bump the version, follow this file. Do every step
 in the same bump. Skipping any one causes mismatched copies in play.
 
-GitHub zip folder name = GitHub repo name. The agent CAN rename the
-repo from here with `gh repo rename` (old URL redirects). The user must
-rename the local Steam folder in Explorer afterward — do not move the
-Cursor workspace folder from under the editor.
+Two local folders (IMPORTANT)
+-----------------------------
+The user keeps TWO copies side by side in the Steam Maps folder:
+
+  1. Working copy:  ...\Assets\Maps\Weevee-v11.08-Map-main\
+     This is the folder Claude Code / the editor is attached to. Its name
+     is deliberately frozen at "v11.08" forever so the Claude Code project
+     connection (and its memory) stays intact. NEVER ask the user to rename
+     it, never move it, and never treat its name as a version mismatch.
+     The real version lives in this file and in the map lua, not here.
+
+  2. Play copy:     ...\Assets\Maps\Weevee-vX.Y.Z-Map-main\  (sibling)
+     When the user wants to play the same version as others, they download
+     the pushed release from GitHub (Download ZIP), which unpacks as this
+     folder. It's a read-only snapshot of whatever was last pushed -- never
+     edit it. Local work in the working copy is invisible to it (and to
+     everyone else) until it's committed and pushed in a bump.
+
+Both folders contain a "Weevee - vX.Y.Z.lua" map, so both show up in the
+game's map list. Between bumps both carry the same in-game title, so the
+list shows two identically named entries -- the working copy is the one
+with unreleased changes.
+
+GitHub repo name = zip folder name of the play copy. The agent CAN rename
+the repo from here with `gh repo rename` (old URL redirects).
 
 Current version: 11.0.15
 Next version:    11.0.16  (set this as current after a successful bump)
@@ -17,8 +38,8 @@ Names for version X.Y.Z
 In-game title:  Weevee Map X.Y.Z
 Lua file:       Weevee - vX.Y.Z.lua
 GitHub repo:    Weevee-vX.Y.Z-Map
-Steam folder:   Weevee vX.Y.Z Map
-  (path: ...\Sid Meier's Civilization V\Assets\Maps\<Steam folder>\)
+Play folder:    Weevee-vX.Y.Z-Map-main  (created by the user's ZIP download)
+Working folder: Weevee-v11.08-Map-main  (never changes, see above)
 
 Agent steps (in order)
 ----------------------
@@ -38,14 +59,16 @@ Agent steps (in order)
    then: git remote set-url origin https://github.com/brunotho/Weevee-vX.Y.Z-Map.git
    Do not change git config. Do not force-push. Do not --amend unless
    the commit protocol allows it.
-7. Tell the user to rename the Steam folder in Explorer to:
-     Weevee vX.Y.Z Map
-   and to reopen the project from that folder if Cursor loses the root.
+7. Tell the user the new version is pushed and they can Download ZIP
+   from https://github.com/brunotho/Weevee-vX.Y.Z-Map to get the new play
+   copy (Weevee-vX.Y.Z-Map-main). They can delete the previous play copy
+   folder. Do NOT ask them to rename or move the working folder.
 
 Notes
 -----
-- Download ZIP unpacks as Weevee-vX.Y.Z-Map-main. That is the folder
-  people copy into Maps. If the folder name does not match the version
-  they agreed to play, it is the wrong copy.
-- Local uncommitted edits are invisible to everyone else until step 5.
+- The working folder's "v11.08" name is intentional and permanent.
+- If the play copy's folder name does not match the version they agreed
+  to play with others, they downloaded the wrong copy.
+- Local uncommitted/unpushed edits are invisible to everyone else until
+  step 5.
 - Do not bump by only editing the in-game title.

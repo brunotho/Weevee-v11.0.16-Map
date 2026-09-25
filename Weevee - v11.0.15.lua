@@ -346,12 +346,14 @@ function GetBarrierConfig()
 		return {
 			kind = "frosty",
 			wrap = wrap,
-			mountainPct = 2,
-			hillPct = 19,
+			-- Bare rocky tundra strip: no forest at all (see also
+			-- StripFrostySeparatorForests, which clears what vanilla's own
+			-- AddFeatures forest pass puts there), a heavier hill share and
+			-- a touch more mountains (2 -> 3%) to compensate.
+			mountainPct = 3,
+			hillPct = 28,
 			iceLakePermille = 0,
-			-- A boreal barrier transition band reasonably carries some
-			-- sparse conifer forest, unlike Tongue/Bramble's bare tundra.
-			forestPct = 10,
+			forestPct = 0,
 			oasisPctOfFlat = 0,
 			-- Front mountains now use the column-weighted ridge design (see
 			-- the front-mountain dispatch below), not the generic chaotic
@@ -504,7 +506,11 @@ function ResolveSaltWaterPlan()
 			-- dominant source of total-area variance. A narrow, climate-
 			-- specific band here (43-50%, vs. the old binary 25-or-50)
 			-- keeps keepH within a few rows of the same value every time.
-			saltCutPct = 43 + Map.Rand(8, "Frosty BackCoast Cut");
+			-- 43-50 -> 38-42: the window now reaches further down the west
+			-- edge (keepH ~58-62% of map height, was ~50-57%) -- part of a
+			-- ~20% back-ocean area bump. Total area itself is pinned by
+			-- ShapeNoWrapBackstrip's frosty budget normalization, not here.
+			saltCutPct = 38 + Map.Rand(5, "Frosty BackCoast Cut");
 			saltNSeas = 0;
 		else
 			if Map.Rand(2, "Explo back coast plan") == 0 then
@@ -4375,7 +4381,7 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 	-- horizontally while making up the difference (plus a further ~15%)
 	-- in the basePct vertical extent below, for roughly the same-or-larger
 	-- total area with a much taller, shallower shape.
-	local backMax = isPeaks and 8 or (isFrosty and 7 or 2);
+	local backMax = isPeaks and 8 or (isFrosty and 8 or 2);
 	-- Per-row random-walk step size: how much depth can jump row to row, not
 	-- just the clamp range it wanders within. Frosty widens this too (see
 	-- below) since a wide min/maxD clamp alone still reads fairly smooth if
@@ -4394,10 +4400,14 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 			-- 3 wet", almost no visible variation at all; this reads as a
 			-- properly ragged, occasionally near-dry-to-near-full coastline
 			-- from row to row instead.
+			-- Pushed once more (2026-09-25): maxD 6 -> 7 / backMax 7 -> 8
+			-- for a bit more horizontal space grab, and step +/-2 -> +/-3
+			-- for more row-to-row noise. Total area no longer rides on the
+			-- walk at all -- see the budget normalization after the walk.
 			minD = 0;
-			maxD = 6;
+			maxD = 7;
 			depth = 3;
-			stepRange = 5;
+			stepRange = 7;
 		elseif isPeaks then
 			-- The old per-tile island scatter below (nIslands) is bypassed
 			-- entirely for Peaks -- AddPeaksBackCoastIslands does all real
@@ -4468,6 +4478,7 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 			y = y + 1;
 		end
 	end
+	local rowDepths = {};
 	local y = 0;
 	while isPeaks == false and y < iH do
 		local step = Map.Rand(stepRange, "NoWrap Coast Walk") - math.floor(stepRange / 2);
@@ -4478,6 +4489,7 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 		if depth > maxD then
 			depth = maxD;
 		end
+		rowDepths[y] = depth;
 		local x = 0;
 		while x <= backMax do
 			local i = y * iW + x + 1;
@@ -4489,6 +4501,95 @@ function ShapeNoWrapBackstrip(plotTypes, iW, iH)
 			x = x + 1;
 		end
 		y = y + 1;
+	end
+	-- Frosty budget normalization. The random walk above is a great shape
+	-- generator but a terrible area generator: a 15-18 row walk clamped to
+	-- 0..maxD can sit low (or high) for most of its length, and logged rolls
+	-- showed total salt water swinging ~3.5x (44..154 tiles on 48x28) --
+	-- the "extremely tiny back ocean" rolls. Keep the walk's ragged shape
+	-- but rescale its depths so the kept window's water always lands within
+	-- +/-5% of a fixed budget (FROSTY_BACK_MEAN_DEPTH per kept row).
+	-- Effective water per row counts the forced x=1 column below: depth 0
+	-- still gets 1 tile (x=1), depth 1 gets 2 (x=0 and x=1).
+	if isFrosty then
+		local fCut = ResolveExploBackCoastPlan();
+		local fKeepH = math.floor(iH * (100 - fCut) / 100);
+		if fKeepH < 4 then
+			fKeepH = 4;
+		end
+		if fKeepH > iH then
+			fKeepH = iH;
+		end
+		local fY0 = iH - fKeepH;
+		local function eff(d)
+			if d <= 0 then
+				return 1
+			elseif d == 1 then
+				return 2
+			end
+			return d
+		end
+		-- 3.45: old walk averaged ~47 tiles/side (sim + logs); this lands
+		-- ~56-57, i.e. the requested ~+20%, with a ~53-60 spread.
+		local meanDepth = 3.45;
+		local target = math.floor(fKeepH * meanDepth * (95 + Map.Rand(11, "Frosty BackCoast Budget")) / 100 + 0.5);
+		local sum = 0;
+		local yy = fY0;
+		while yy < iH do
+			sum = sum + eff(rowDepths[yy]);
+			yy = yy + 1;
+		end
+		if sum > 0 then
+			local scale = target / sum;
+			yy = fY0;
+			while yy < iH do
+				local d = math.floor(rowDepths[yy] * scale + 0.5);
+				if d < minD then
+					d = minD;
+				end
+				if d > maxD then
+					d = maxD;
+				end
+				rowDepths[yy] = d;
+				yy = yy + 1;
+			end
+		end
+		sum = 0;
+		yy = fY0;
+		while yy < iH do
+			sum = sum + eff(rowDepths[yy]);
+			yy = yy + 1;
+		end
+		local guard = 0;
+		while sum ~= target and guard < 400 do
+			guard = guard + 1;
+			local ry = fY0 + Map.Rand(fKeepH, "Frosty BackCoast Nudge");
+			local d = rowDepths[ry];
+			if sum < target and d < maxD then
+				local before = eff(d);
+				rowDepths[ry] = d + 1;
+				sum = sum + eff(d + 1) - before;
+			elseif sum > target and d > minD then
+				local before = eff(d);
+				rowDepths[ry] = d - 1;
+				sum = sum + eff(d - 1) - before;
+			end
+		end
+		yy = fY0;
+		while yy < iH do
+			local x = 0;
+			while x <= backMax do
+				local i = yy * iW + x + 1;
+				if x < rowDepths[yy] then
+					plotTypes[i] = PlotTypes.PLOT_OCEAN;
+				elseif x <= backMax - 1 then
+					plotTypes[i] = PlotTypes.PLOT_LAND;
+				end
+				x = x + 1;
+			end
+			yy = yy + 1;
+		end
+		WeeveeDbgPersist("Frosty back coast: keepH=" .. fKeepH .. " target=" .. target .. " final=" .. sum);
 	end
 	local cutPct = ResolveExploBackCoastPlan();
 	local winY0 = 0;
@@ -6180,6 +6281,145 @@ function CapSeaResources()
 	print("Sea resources (pre-mirror) capped:", n, "->", n - removedFish - removedLux, "removed fish=", removedFish, "removed lux=", removedLux);
 end
 ------------------------------------------------------------------------------
+-- Floor to CapSeaResources' ceiling (same count, same west-half scope, same
+-- IsCappedSeaResource set incl. lake tiles): if fewer than SEA_RESOURCE_MIN
+-- sea resources survived, top up with Fish on open salt-water tiles that
+-- touch land (never lakes -- PurgeNearStartLakeFish owns that question),
+-- skipping barrier/separator columns. First pass keeps new Fish at least
+-- 3 tiles from any other sea resource so they spread out along the coast;
+-- a second pass relaxes that to 2 if the first runs dry.
+SEA_RESOURCE_MIN = 9;
+function EnsureSeaResourceMinimum()
+	local fishID = GameInfoTypes["RESOURCE_FISH"];
+	if fishID == nil then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local maxX = iW;
+	if DEF_MIRRORED == 1 then
+		maxX = iW * 0.5;
+	end
+	local existing = {};
+	local y = 0;
+	while y < iH do
+		local x = 0;
+		while x <= maxX do
+			local plot = Map.GetPlot(x, y);
+			if plot ~= nil and plot:IsWater() and IsCappedSeaResource(plot:GetResourceType(-1)) then
+				table.insert(existing, plot);
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	local n = #existing;
+	if n >= SEA_RESOURCE_MIN then
+		return
+	end
+	local function touchesLand(plot)
+		local d = 0;
+		while d < DirectionTypes.NUM_DIRECTION_TYPES do
+			local adj = PlotDirNoXWrap(plot:GetX(), plot:GetY(), d);
+			if adj ~= nil and adj:IsWater() == false then
+				return true
+			end
+			d = d + 1;
+		end
+		return false
+	end
+	local function farFromOthers(plot, minDist)
+		local i = 1;
+		while i <= #existing do
+			if Map.PlotDistance(plot:GetX(), plot:GetY(), existing[i]:GetX(), existing[i]:GetY()) < minDist then
+				return false
+			end
+			i = i + 1;
+		end
+		return true
+	end
+	local added = 0;
+	local minDist = 3;
+	while minDist >= 2 and n < SEA_RESOURCE_MIN do
+		local cands = {};
+		y = 0;
+		while y < iH do
+			local skip = RowMireSkip(iW, y);
+			local x = 0;
+			while x <= maxX do
+				if skip[x] ~= true then
+					local plot = Map.GetPlot(x, y);
+					if plot ~= nil
+						and plot:IsWater()
+						and plot:IsLake() == false
+						and plot:GetFeatureType() == FeatureTypes.NO_FEATURE
+						and plot:GetResourceType(-1) == -1
+						and touchesLand(plot)
+						and plot:CanHaveResource(fishID, true) then
+						table.insert(cands, plot);
+					end
+				end
+				x = x + 1;
+			end
+			y = y + 1;
+		end
+		cands = GetShuffledCopyOfTable(cands);
+		local ci = 1;
+		while ci <= #cands and n < SEA_RESOURCE_MIN do
+			local plot = cands[ci];
+			if farFromOthers(plot, minDist) then
+				plot:SetResourceType(fishID, 1);
+				table.insert(existing, plot);
+				n = n + 1;
+				added = added + 1;
+			end
+			ci = ci + 1;
+		end
+		minDist = minDist - 1;
+	end
+	print("Sea resources (pre-mirror) floor:", n - added, "->", n, "added fish=", added);
+end
+------------------------------------------------------------------------------
+-- Final safety net: no land-only resource may ever sit on a water tile
+-- (a Peaky roll showed Silver inside a lake; every luxury placer checks
+-- CanHaveResource, so some pass must be turning an already-resourced land
+-- tile into water or copying a resource across -- not yet pinned down).
+-- Real sea resources (the capped set plus Oil) are always left alone;
+-- anything else on water is re-checked with the same CanHaveResource test
+-- the engine uses (cleared first, since a present resource can skew it)
+-- and dropped if it isn't legal there. Logged with coordinates so the
+-- culprit can be traced from weevee_persist.log.
+function StripIllegalWaterResources()
+	local oilID = GameInfoTypes["RESOURCE_OIL"];
+	local iW, iH = Map.GetGridSize();
+	local mirrored = (DEF_MIRRORED == 1);
+	local n = 0;
+	local y = 0;
+	while y < iH do
+		local x = 0;
+		while x < iW do
+			if MirrorOwnsPlot(x, y, mirrored, iW) then
+				local plot = Map.GetPlot(x, y);
+				if plot ~= nil and plot:IsWater() then
+					local res = plot:GetResourceType(-1);
+					if res ~= -1 and IsCappedSeaResource(res) == false and res ~= oilID then
+						local amt = plot:GetNumResource();
+						plot:SetResourceType(-1);
+						if plot:CanHaveResource(res, true) then
+							plot:SetResourceType(res, amt);
+						else
+							n = n + 1;
+							WeeveeDbgPersist("StripIllegalWaterResources: removed res=" .. tostring(res) .. " at " .. x .. "," .. y .. " lake=" .. tostring(plot:IsLake()));
+						end
+					end
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	print("Illegal water resources stripped:", n);
+end
+------------------------------------------------------------------------------
 function ThinOasisCoastalLuxuries()
 	if IsOasisClimate() == false then
 		return
@@ -7146,6 +7386,7 @@ function GenerateTerrain()
 	AddFrostyPolarMountainRidge();
 	AddFrostySnowFingers();
 	AddFrostySnowHills();
+	CapFrostyDesertPatches();
 	AddFrostyDesertHills();
 	WeeveeDbg("GenerateTerrain done");
 end
@@ -13486,6 +13727,102 @@ function AddFrostySnowHills()
 	print("Frosty snow hills added:", n);
 end
 ------------------------------------------------------------------------------
+-- Vanilla's desert fractal occasionally high-rolls one huge connected Desert
+-- patch in Frosty's warm corner. Lowers that ceiling without touching how
+-- many patches there are: every connected Desert patch bigger than its
+-- rolled cap (9-12 tiles) keeps a compact cap-sized blob grown outward
+-- from a random tile inside it (shuffled neighbor order so the kept blob
+-- isn't a perfect hex), and everything past that reverts to Plains. Runs
+-- before AddFrostyDesertHills so the hill share applies to the kept blobs.
+function CapFrostyDesertPatches()
+	local cfg = GetBarrierConfig();
+	if cfg == nil or cfg.kind ~= "frosty" then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local mirrored = (DEF_MIRRORED == 1);
+	local skip = FillMireSkip(iW);
+	local function isDesert(p)
+		return p ~= nil and p:IsWater() == false and p:GetTerrainType() == TerrainTypes.TERRAIN_DESERT
+	end
+	local function owned(x, y)
+		return skip[x] ~= true and MirrorOwnsPlot(x, y, mirrored, iW)
+	end
+	local seen = {};
+	local sizes = {};
+	local trimmed = 0;
+	local y0 = 0;
+	while y0 < iH do
+		local x0 = 0;
+		while x0 < iW do
+			local i0 = y0 * iW + x0 + 1;
+			local seed = Map.GetPlot(x0, y0);
+			if seen[i0] ~= true and owned(x0, y0) and isDesert(seed) then
+				local comp = {seed};
+				local inComp = {};
+				inComp[i0] = true;
+				seen[i0] = true;
+				local qi = 1;
+				while qi <= #comp do
+					local p = comp[qi];
+					qi = qi + 1;
+					local d = 0;
+					while d < DirectionTypes.NUM_DIRECTION_TYPES do
+						local adj = PlotDirNoXWrap(p:GetX(), p:GetY(), d);
+						if adj ~= nil and isDesert(adj) and owned(adj:GetX(), adj:GetY()) then
+							local ai = adj:GetY() * iW + adj:GetX() + 1;
+							if seen[ai] ~= true then
+								seen[ai] = true;
+								inComp[ai] = true;
+								table.insert(comp, adj);
+							end
+						end
+						d = d + 1;
+					end
+				end
+				table.insert(sizes, #comp);
+				local cap = 9 + Map.Rand(4, "Frosty Desert Patch Cap");
+				if #comp > cap then
+					local start = comp[1 + Map.Rand(#comp, "Frosty Desert Patch Core")];
+					local keep = {};
+					local kept = {start};
+					keep[start:GetY() * iW + start:GetX() + 1] = true;
+					local ki = 1;
+					while ki <= #kept and #kept < cap do
+						local p = kept[ki];
+						ki = ki + 1;
+						local dirs = GetShuffledCopyOfTable({0, 1, 2, 3, 4, 5});
+						local di = 1;
+						while di <= #dirs and #kept < cap do
+							local adj = PlotDirNoXWrap(p:GetX(), p:GetY(), dirs[di]);
+							if adj ~= nil then
+								local ai = adj:GetY() * iW + adj:GetX() + 1;
+								if inComp[ai] == true and keep[ai] ~= true then
+									keep[ai] = true;
+									table.insert(kept, adj);
+								end
+							end
+							di = di + 1;
+						end
+					end
+					local ci = 1;
+					while ci <= #comp do
+						local p = comp[ci];
+						if keep[p:GetY() * iW + p:GetX() + 1] ~= true then
+							p:SetTerrainType(TerrainTypes.TERRAIN_PLAINS, false, false);
+							trimmed = trimmed + 1;
+						end
+						ci = ci + 1;
+					end
+				end
+			end
+			x0 = x0 + 1;
+		end
+		y0 = y0 + 1;
+	end
+	WeeveeDbgPersist("Frosty desert patches (pre-cap sizes): " .. table.concat(sizes, ",") .. " trimmed=" .. trimmed);
+end
+------------------------------------------------------------------------------
 -- Desert reads suspiciously flat in places -- promotes a modest fraction of
 -- flat Desert tiles to Hills, independent of whatever the ambient elevation
 -- fractal already put there (Desert terrain itself doesn't structurally
@@ -18439,6 +18776,38 @@ function StripOasisBarrierForests()
 	print("Oasis barrier forests stripped:", n);
 end
 ------------------------------------------------------------------------------
+-- Frosty's tundra separator strip stays bare of Forest: vanilla's own
+-- AddFeatures forest pass (iForestPercent 40 for this climate) covers the
+-- strip like any other tundra, so zeroing forestPct alone isn't enough.
+-- Barrier resources were already stripped earlier (StripBarrierResources),
+-- so no deer/fur exemption is needed here.
+function StripFrostySeparatorForests()
+	local cfg = GetBarrierConfig();
+	if cfg == nil or cfg.kind ~= "frosty" then
+		return
+	end
+	local iW, iH = Map.GetGridSize();
+	local mirrored = (DEF_MIRRORED == 1);
+	local skip = FillMireSkip(iW);
+	local n = 0;
+	local y = 0;
+	while y < iH do
+		local x = 0;
+		while x < iW do
+			if skip[x] == true and MirrorOwnsPlot(x, y, mirrored, iW) then
+				local plot = Map.GetPlot(x, y);
+				if plot ~= nil and plot:GetFeatureType() == FeatureTypes.FEATURE_FOREST then
+					plot:SetFeatureType(FeatureTypes.NO_FEATURE, -1);
+					n = n + 1;
+				end
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	print("Frosty separator forests stripped:", n);
+end
+------------------------------------------------------------------------------
 function GetWestTundraFrontBands(iW)
 	local bands = {};
 	local wrapN, centerN = ResolveSnowWrapWidths();
@@ -19802,6 +20171,7 @@ function StartPlotSystem()
 	WeeveeDbgCall("WastelandTundraStartHillForest", function() WastelandTundraStartHillForest(start_plot_database) end);
 	WeeveeDbgCall("AddSnowForests", AddSnowForests);
 	WeeveeDbgCall("StripOasisBarrierForests", StripOasisBarrierForests);
+	WeeveeDbgCall("StripFrostySeparatorForests", StripFrostySeparatorForests);
 	WeeveeDbgCall("StripBrambleSeparatorFeatures", StripBrambleSeparatorFeatures);
 	WeeveeDbgCall("PlaceBrambleSaltFish", PlaceBrambleSaltFish);
 	WeeveeDbgCall("ForestTundraSeparatorResources", ForestTundraSeparatorResources);
@@ -19837,7 +20207,9 @@ function StartPlotSystem()
 	-- Runs last, not before the luxury-quota/floor passes above: any of them
 	-- can place a pearls/whale/crab to help hit a target, and a sea-resource
 	-- cap that runs before that can't catch what gets added after it.
+	WeeveeDbgCall("StripIllegalWaterResources", StripIllegalWaterResources);
 	WeeveeDbgCall("CapSeaResources", CapSeaResources);
+	WeeveeDbgCall("EnsureSeaResourceMinimum", EnsureSeaResourceMinimum);
 	-- Everything below that can still move a start or edit a plot is confined
 	-- to the west/canonical side only (IsMirrorEastSubject gates every one of
 	-- them) and must run BEFORE the mirror copy, never after -- the copy is
@@ -19868,6 +20240,10 @@ function StartPlotSystem()
 	WeeveeDbgCall("OasisJadeFlatDesertToHill", OasisJadeFlatDesertToHill);
 	WeeveeDbgCall("StripLuxuryOnTinyPeaksIslands", StripLuxuryOnTinyPeaksIslands);
 	WeeveeDbgCall("StripFrostyHarshLuxuries", StripFrostyHarshLuxuries);
+	-- Again here, as the true last pre-mirror step: every late pass above
+	-- (start fixes, regional/quota luxury forcing, trims) runs after the
+	-- first sweep and can still edit plots.
+	WeeveeDbgCall("StripIllegalWaterResources-final", StripIllegalWaterResources);
 	WeeveeDbgCall("LogRegionalLuxuryCounts-preMirror", function() LogRegionalLuxuryCounts(start_plot_database, "pre-mirror-final") end);
 	WeeveeDbg("before mirror");
 	if DEF_MIRRORED == 1 then
