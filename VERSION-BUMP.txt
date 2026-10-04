@@ -30,8 +30,8 @@ with unreleased changes.
 GitHub repo name = zip folder name of the play copy. The agent CAN rename
 the repo from here with `gh repo rename` (old URL redirects).
 
-Current version: 11.0.15
-Next version:    11.0.16  (set this as current after a successful bump)
+Current version: 11.0.16
+Next version:    11.0.17  (set this as current after a successful bump)
 
 Names for version X.Y.Z
 -----------------------

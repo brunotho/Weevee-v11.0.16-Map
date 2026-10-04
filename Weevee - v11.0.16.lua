@@ -12,7 +12,7 @@ include("DEFMultilayeredFractalW");
 include("DEFFeatureGeneratorW");
 include("DEFTerrainGeneratorW");
 
-print("Weevee Map 11.0.15 script loaded");
+print("Weevee Map 11.0.16 script loaded");
 
 local weeveeDbgHandle = nil;
 local WEEVEE_DBG_PATHS = {
@@ -88,7 +88,7 @@ function WeeveeDbgCall(name, fn, a1, a2, a3, a4, a5)
 		WeeveeDbg("ERR " .. name .. " " .. tostring(err));
 	end
 end
-WeeveeDbg("script loaded 11.0.15");
+WeeveeDbg("script loaded 11.0.16");
 
 local OPT_CENTER_SPLIT = 1;
 -- Frozen value of the former "Barrier Width" custom option (was the
@@ -180,6 +180,12 @@ local riverEdgeList = {};
 -- toward existing water bodies (back coast, lakes, ponds) over any distance,
 -- not just the single tile of lookahead the base algorithm already had.
 local riverWaterDist = nil;
+-- Per-tile hex distance to the nearest barrier/separator plot
+-- (IsRiverBarrierColumn), rebuilt with riverWaterDist. Drives the "front
+-- zone" river rules: fewer sources, a westward push and a N/S-step penalty
+-- within RIVER_FRONT_ZONE tiles of the barrier.
+local riverFrontDist = nil;
+RIVER_FRONT_ZONE = 4;
 
 ------------------------------------------------------------------------------
 function GetResourceSetting()
@@ -188,7 +194,7 @@ end
 ------------------------------------------------------------------------------
 function GetMapScriptInfo()
 	return {
-		Name = "[COLOR_HIGHLIGHT_TEXT] Weevee Map 11.0.15 [ENDCOLOR]",
+		Name = "[COLOR_HIGHLIGHT_TEXT] Weevee Map 11.0.16 [ENDCOLOR]",
 		Description = "",
 		IsAdvancedMap = false,
 		SupportsMultiplayer = true,
@@ -4931,7 +4937,10 @@ function PlaceDiagonalBackWater(plotTypes, iW, iH)
 	-- by 1% off the top since the coast covers less than the full height
 	-- (see coastWinH below) and would otherwise just get pushed elsewhere
 	-- instead of actually reduced.
-	local westTarget = math.floor(totalTiles * (pct - 1) / 100 / 2);
+	-- x1.06 (2026-10-04): half of Standard's ~+12% water bump, for both
+	-- Diagonal and Bramble (sea resources ran under the 9 floor on 2/5
+	-- Diagonal rolls).
+	local westTarget = math.floor(totalTiles * (pct - 1) * 1.06 / 100 / 2);
 
 	local mirrored = (DEF_MIRRORED == 1);
 	local function inlandAllowed(x, y)
@@ -5143,7 +5152,13 @@ function PlaceStandardEdgeSeas(plotTypes, iW, iH)
 	end
 	local n = 1;
 	while n <= seas do
-		local lakeSize = 3 + Map.Rand(8, "Standard Edge Sea Size");
+		-- 3-10 (avg 6.5) -> 5-14 (avg 9.5): ~+4.5 salt tiles per side on
+		-- average (1.5 seas/roll), i.e. ~+12% of Standard's ~38/side total
+		-- (2 x keepH back strip + seas). Goal: the natural (pre-cap/floor)
+		-- sea-resource count should spread across the 9..15 band rather
+		-- than leaning on EnsureSeaResourceMinimum -- see "SEA RES" lines
+		-- in weevee_persist.log.
+		local lakeSize = 5 + Map.Rand(10, "Standard Edge Sea Size");
 		local edge = Map.Rand(3, "Standard sea edge");
 		local seedX, seedY;
 		local attempt = 1;
@@ -6254,6 +6269,14 @@ function CapSeaResources()
 	local nFish = #fishPlots;
 	local nOther = #otherPlots;
 	local n = nFish + nOther;
+	local resCfg = GetBarrierConfig();
+	local resKind = "nil";
+	if resCfg ~= nil then
+		resKind = tostring(resCfg.kind);
+	end
+	WeeveeDbgPersist("SEA RES kind=" .. resKind .. " tilted=" .. tostring(IsTiltedMirrorAxis())
+		.. " iW=" .. iW .. " natural=" .. n .. " fish=" .. nFish .. " coastLux=" .. nOther
+		.. " band=" .. SEA_RESOURCE_MIN .. ".." .. cap);
 	if n <= cap then
 		print("Sea resources (pre-mirror):", n, "fish=", nFish, "coastLux=", nOther);
 		return
@@ -6294,6 +6317,16 @@ function EnsureSeaResourceMinimum()
 	if fishID == nil then
 		return
 	end
+	local minWant = SEA_RESOURCE_MIN;
+	-- Peaky's natural count sat right at the floor (9, 9). Its water stays as
+	-- is; instead top up to a per-roll target shaped like Standard's natural
+	-- spread (logged 9-14, mean ~11.5): 9 + Rand(4) + Rand(3) = 9..14,
+	-- mean 11.5, peaked in the middle.
+	local seaCfg = GetBarrierConfig();
+	if seaCfg ~= nil and seaCfg.kind == "peaks" then
+		minWant = SEA_RESOURCE_MIN + Map.Rand(4, "Peaks sea res A") + Map.Rand(3, "Peaks sea res B");
+		WeeveeDbgPersist("SEA RES peaks floor target=" .. minWant);
+	end
 	local iW, iH = Map.GetGridSize();
 	local maxX = iW;
 	if DEF_MIRRORED == 1 then
@@ -6313,7 +6346,7 @@ function EnsureSeaResourceMinimum()
 		y = y + 1;
 	end
 	local n = #existing;
-	if n >= SEA_RESOURCE_MIN then
+	if n >= minWant then
 		return
 	end
 	local function touchesLand(plot)
@@ -6339,7 +6372,7 @@ function EnsureSeaResourceMinimum()
 	end
 	local added = 0;
 	local minDist = 3;
-	while minDist >= 2 and n < SEA_RESOURCE_MIN do
+	while minDist >= 2 and n < minWant do
 		local cands = {};
 		y = 0;
 		while y < iH do
@@ -6364,7 +6397,7 @@ function EnsureSeaResourceMinimum()
 		end
 		cands = GetShuffledCopyOfTable(cands);
 		local ci = 1;
-		while ci <= #cands and n < SEA_RESOURCE_MIN do
+		while ci <= #cands and n < minWant do
 			local plot = cands[ci];
 			if farFromOthers(plot, minDist) then
 				plot:SetResourceType(fishID, 1);
@@ -6377,6 +6410,7 @@ function EnsureSeaResourceMinimum()
 		minDist = minDist - 1;
 	end
 	print("Sea resources (pre-mirror) floor:", n - added, "->", n, "added fish=", added);
+	WeeveeDbgPersist("SEA RES floor before=" .. (n - added) .. " after=" .. n .. " added=" .. added .. " want=" .. minWant);
 end
 ------------------------------------------------------------------------------
 -- Final safety net: no land-only resource may ever sit on a water tile
@@ -6932,6 +6966,12 @@ function MultilayeredFractal:GeneratePlotsByRegion()
 			end
 			for n = 1, nBodies do
 				local lakeSize = 3 + Map.Rand(8, "Snow Wrap Lake Size");
+				if cfg.kind == "wetland" then
+					-- Murky's water is Standard's twin (same 2-col back strip,
+					-- same 1-2 bodies of 3-10); matches the 5-14 bump in
+					-- PlaceStandardEdgeSeas (~+12% salt water).
+					lakeSize = 5 + Map.Rand(10, "Snow Wrap Lake Size");
+				end
 				local circular = (Map.Rand(2, "Snow Wrap Lake Shape") == 0);
 				local wantIsland = circular and lakeSize >= 6 and (Map.Rand(2, "Snow Wrap Lake Island") == 0);
 				local seedX, seedY;
@@ -9096,7 +9136,22 @@ function TrimLuxuryQuotaExcess(asp)
 	WeeveeDbgPersist("TrimLuxuryQuotaExcess trimmed=" .. nTrimmed .. " final unique=" .. nUnique .. "/" .. wantU .. " dup=" .. nDup .. "/" .. wantD .. " trip=" .. nTrip .. "/" .. wantT);
 end
 ------------------------------------------------------------------------------
-function EnsureStartLuxuryFloor()
+-- Region-assigned luxury ID for a player index, or nil.
+function RegionalLuxuryForPlayer(asp, playerIndex)
+	if asp == nil or asp.region_luxury_assignment == nil or asp.player_ID_list == nil then
+		return nil
+	end
+	local rn = 1;
+	while rn <= asp.iNumCivs do
+		if asp.player_ID_list[rn] == playerIndex then
+			return asp.region_luxury_assignment[rn];
+		end
+		rn = rn + 1;
+	end
+	return nil
+end
+------------------------------------------------------------------------------
+function EnsureStartLuxuryFloor(asp)
 	local want = 3;
 	local maxD = 3;
 	local banned = {};
@@ -9195,6 +9250,13 @@ function EnsureStartLuxuryFloor()
 						end
 					end
 					local bags = {idsNew, idsHave, idsAny};
+					-- The capital ring should hold this region's OWN luxury first
+					-- (3 regional near, 3 more just outside -- see
+					-- EnsureRegionalLuxuryTarget). idsNew alone leaned away from it.
+					local regID = RegionalLuxuryForPlayer(asp, pi);
+					if regID ~= nil and banned[regID] ~= true then
+						bags = {{regID}, idsNew, idsHave, idsAny};
+					end
 					local b = 1;
 					while nHave < want and b <= #bags do
 						local ids = bags[b];
@@ -9243,7 +9305,13 @@ end
 -- luxury) an occupied one if no empty legal tile is left, then a legalizing
 -- edit (see tryTerraformPlace) as a final resort.
 --
--- Deliberately never touches anything within radius 3 of any capital.
+-- 2026-10-04 SUPERSEDES the next paragraph: logs showed ~75% of regions
+-- with zero regional copies in the ring, so a ring phase (tryRing,
+-- additive-only, 3 copies) now runs first, only copies within
+-- REGIONAL_LOCAL_R count toward the target, and far copies are removed
+-- once targets are met. "REGIONAL SPREAD" lines log the result.
+--
+-- (Historical) Deliberately never touches anything within radius 3 of any capital.
 -- Vanilla's own start-tile pass plus EnsureStartLuxuryFloor already reliably
 -- build the classic 3 (regional) + 1 (other) near-capital pattern on their
 -- own, before this function ever runs -- an earlier version of this
@@ -9259,6 +9327,10 @@ end
 -- shaped region can't starve it the way vanilla's tiered lists can. Global
 -- unique/dup/triplicate ranges get disrupted by the bouncing, so the caller
 -- is expected to run EnsureLuxuryQuota() again afterward to rebalance.
+-- Copies of a region's luxury only count toward its target within this
+-- many tiles of the capital; copies beyond it are cleaned up once the
+-- target is met (see the far-copy pass at the end).
+REGIONAL_LOCAL_R = 8;
 function EnsureRegionalLuxuryTarget(asp)
 	if asp == nil or asp.region_luxury_assignment == nil or asp.player_ID_list == nil then
 		return
@@ -9753,6 +9825,90 @@ function EnsureRegionalLuxuryTarget(asp)
 		bounced:SetResourceType(resID, 1);
 		return true
 	end
+	local function nearOtherCapital(x, y, buf, ownSp)
+		local pi = 0;
+		while pi < GameDefines.MAX_MAJOR_CIVS do
+			local p = Players[pi];
+			if p ~= nil and p:IsAlive() then
+				local otherSp = p:GetStartingPlot();
+				if otherSp ~= nil and otherSp ~= ownSp
+					and Map.PlotDistance(x, y, otherSp:GetX(), otherSp:GetY()) <= buf then
+					return true
+				end
+			end
+			pi = pi + 1;
+		end
+		return false
+	end
+	-- One regional copy into this capital's radius-3 ring. Tiers: empty legal
+	-- tile not touching another luxury; empty legal tile; empty tile made
+	-- legal (tryTerraformOnPlot); finally swapping out a NON-regional luxury
+	-- sitting in the ring (EnsureLuxuryQuota-postRegionalForce re-pads it
+	-- elsewhere). Never the start tile, never near another capital.
+	local function tryRing(sp, resID)
+		local sx, sy = sp:GetX(), sp:GetY();
+		local cands = {};
+		local yy = sy - 3;
+		while yy <= sy + 3 do
+			local xx = sx - 3;
+			while xx <= sx + 3 do
+				local d = Map.PlotDistance(sx, sy, xx, yy);
+				if d >= 1 and d <= 3 then
+					local plot = Map.GetPlot(xx, yy);
+					if plot ~= nil
+						and plot:IsWater() == false
+						and plot:GetPlotType() ~= PlotTypes.PLOT_MOUNTAIN
+						and PlotIsMajorStart(plot) == false
+						and inBarrier(xx, yy) == false
+						and nearOtherCapital(xx, yy, 3, sp) == false
+						and tooCloseToSame(xx, yy, resID, 2) == false then
+						table.insert(cands, plot);
+					end
+				end
+				xx = xx + 1;
+			end
+			yy = yy + 1;
+		end
+		if #cands > 1 then
+			cands = GetShuffledCopyOfTable(cands);
+		end
+		local tier = 1;
+		while tier <= 4 do
+			local i = 1;
+			while i <= #cands do
+				local plot = cands[i];
+				local existing = plot:GetResourceType(-1);
+				if tier <= 3 and existing == -1 then
+					if tier == 1 then
+						if plot:CanHaveResource(resID) and adjacentToOtherLuxury(plot:GetX(), plot:GetY(), resID) == false then
+							plot:SetResourceType(resID, 1);
+							return true
+						end
+					elseif tier == 2 then
+						if plot:CanHaveResource(resID) then
+							plot:SetResourceType(resID, 1);
+							return true
+						end
+					elseif tryTerraformOnPlot(plot, resID) then
+						plot:SetResourceType(resID, 1);
+						return true
+					end
+				elseif tier == 4 and existing ~= -1 and existing ~= resID
+					and IsWeeveeLuxuryID(existing) and allRegionalLuxIDs[existing] ~= true then
+					plot:SetResourceType(-1);
+					if plot:CanHaveResource(resID) then
+						plot:SetResourceType(resID, 1);
+						return true
+					end
+					plot:SetResourceType(existing, 1);
+				end
+				i = i + 1;
+			end
+			tier = tier + 1;
+		end
+		return false
+	end
+	local regionCaps = {};
 	local nForced = 0;
 	local region_number = 1;
 	while region_number <= asp.iNumCivs do
@@ -9767,7 +9923,26 @@ function EnsureRegionalLuxuryTarget(asp)
 				local resID = asp.region_luxury_assignment[region_number];
 				if resID ~= nil then
 					local target = regionalTarget(region_number, resID);
-					local have = counts[resID] or 0;
+					-- Ring phase (2026-10-04): 3 of the region's own luxury
+					-- within radius 3. Logs showed ~75% of regions had ZERO
+					-- there -- EnsureStartLuxuryFloor filled the ring with
+					-- other types, and starts can still move after it ran.
+					-- Additive only (never trims the ring), never within 3 of
+					-- another capital, so the old overshoot/collateral
+					-- problems of direct ring management can't recur.
+					local ringHave = countNear(sp, resID, 3);
+					while ringHave < 3 do
+						if tryRing(sp, resID) then
+							ringHave = ringHave + 1;
+							nForced = nForced + 1;
+						else
+							break
+						end
+					end
+					-- Only copies near this capital count toward the target;
+					-- a copy 10+ tiles out (vanilla scatters region-wide) used
+					-- to satisfy it. Far ones are cleaned up after the loop.
+					local have = countNear(sp, resID, REGIONAL_LOCAL_R);
 					-- Never touch anything within radius 3 of this capital:
 					-- vanilla's own start-tile pass plus EnsureStartLuxuryFloor
 					-- already reliably build the classic 3 (regional) + 1
@@ -9790,6 +9965,8 @@ function EnsureRegionalLuxuryTarget(asp)
 							break
 						end
 					end
+					-- (2026-10-04: capped at REGIONAL_LOCAL_R = 8, was 12 --
+					-- the 10+-tile "spray" the user saw came from here.)
 					-- This tier reaches out to radius 12 -- far enough that a
 					-- placement here can otherwise land only 4-5 tiles from a
 					-- DIFFERENT capital even while staying outside their
@@ -9806,7 +9983,7 @@ function EnsureRegionalLuxuryTarget(asp)
 					-- the search radius, not a missing terraform option --
 					-- more room is the only lever left.
 					while have < target do
-						if tryBounce(sp, resID, radius + 1, radius + 6, 5) then
+						if tryBounce(sp, resID, radius + 1, REGIONAL_LOCAL_R, 5) then
 							have = have + 1;
 							counts[resID] = have;
 							nForced = nForced + 1;
@@ -9815,7 +9992,7 @@ function EnsureRegionalLuxuryTarget(asp)
 						end
 					end
 					while have < target do
-						if tryTerraformPlace(sp, resID, 4, radius + 6, 5) then
+						if tryTerraformPlace(sp, resID, 4, REGIONAL_LOCAL_R, 5) then
 							have = have + 1;
 							counts[resID] = have;
 							nForced = nForced + 1;
@@ -9884,12 +10061,103 @@ function EnsureRegionalLuxuryTarget(asp)
 					-- vanilla's own near-capital shape stayed untouched.
 					local nearFinal = countNear(sp, resID, 3);
 					WeeveeDbgPersist("EnsureRegionalLuxuryTarget Region#" .. region_number .. " LuxID=" .. resID .. " (" .. resType .. ") target=" .. target .. " final=" .. have .. " nearFinal=" .. nearFinal .. " capital=(" .. sx .. "," .. sy .. ") distToPoleEdge=" .. distToPole .. " distToBarrier=" .. distToBarrier);
+					table.insert(regionCaps, {sp = sp, resID = resID, ok = (have >= target), rn = region_number});
 				end
 			end
 		end
 		region_number = region_number + 1;
 	end
-	WeeveeDbgPersist("EnsureRegionalLuxuryTarget forced " .. nForced .. " copies total");
+	-- Far-copy cleanup: a regional copy farther than REGIONAL_LOCAL_R from
+	-- every capital holding that luxury is the "spray" -- removed, but only
+	-- once every such capital already met its target locally (otherwise the
+	-- far copy is still better than nothing).
+	local nFar = 0;
+	local function capsFor(resID)
+		local list = {};
+		local ci = 1;
+		while ci <= #regionCaps do
+			if regionCaps[ci].resID == resID then
+				table.insert(list, regionCaps[ci]);
+			end
+			ci = ci + 1;
+		end
+		return list
+	end
+	local function minCapDist(caps, x, y)
+		local best = 9999;
+		local ci = 1;
+		while ci <= #caps do
+			local d = Map.PlotDistance(x, y, caps[ci].sp:GetX(), caps[ci].sp:GetY());
+			if d < best then
+				best = d;
+			end
+			ci = ci + 1;
+		end
+		return best
+	end
+	local yy = 0;
+	while yy < iH do
+		local xx = 0;
+		while xx <= maxX do
+			local plot = Map.GetPlot(xx, yy);
+			if plot ~= nil then
+				local res = plot:GetResourceType(-1);
+				if res ~= -1 then
+					local caps = capsFor(res);
+					if #caps > 0 and minCapDist(caps, xx, yy) > REGIONAL_LOCAL_R then
+						local allOk = true;
+						local ci = 1;
+						while ci <= #caps do
+							if caps[ci].ok ~= true then
+								allOk = false;
+							end
+							ci = ci + 1;
+						end
+						if allOk then
+							plot:SetResourceType(-1);
+							nFar = nFar + 1;
+						end
+					end
+				end
+			end
+			xx = xx + 1;
+		end
+		yy = yy + 1;
+	end
+	-- Spread census: every remaining west-half copy's distance to its own
+	-- capital (nearest capital holding that luxury), sorted.
+	local ci = 1;
+	while ci <= #regionCaps do
+		local rc = regionCaps[ci];
+		local caps = capsFor(rc.resID);
+		local dists = {};
+		local ring, far = 0, 0;
+		yy = 0;
+		while yy < iH do
+			local xx = 0;
+			while xx <= maxX do
+				local plot = Map.GetPlot(xx, yy);
+				if plot ~= nil and plot:GetResourceType(-1) == rc.resID then
+					local d = Map.PlotDistance(xx, yy, rc.sp:GetX(), rc.sp:GetY());
+					if d <= minCapDist(caps, xx, yy) then
+						table.insert(dists, d);
+						if d <= 3 then
+							ring = ring + 1;
+						elseif d > REGIONAL_LOCAL_R then
+							far = far + 1;
+						end
+					end
+				end
+				xx = xx + 1;
+			end
+			yy = yy + 1;
+		end
+		table.sort(dists);
+		WeeveeDbgPersist("REGIONAL SPREAD Region#" .. rc.rn .. " LuxID=" .. rc.resID .. " total=" .. #dists
+			.. " ring=" .. ring .. " far=" .. far .. " dists=" .. table.concat(dists, ","));
+		ci = ci + 1;
+	end
+	WeeveeDbgPersist("EnsureRegionalLuxuryTarget forced " .. nForced .. " copies total, removed far=" .. nFar);
 end
 ------------------------------------------------------------------------------
 function StripStartTileLuxuries()
@@ -10540,6 +10808,70 @@ function IsRiverBarrierColumn(x, y)
 	return TongueIsBarrierPlot(x, y);
 end
 ------------------------------------------------------------------------------
+-- BFS hex distance from every plot to the nearest barrier plot. Climates
+-- with no barrier come back all-INF, so every front-zone rule is a no-op.
+function BuildRiverFrontDistanceField()
+	local iW, iH = Map.GetGridSize();
+	local INF = 9999;
+	local dist = {};
+	local qx, qy = {}, {};
+	local qn = 0;
+	local y = 0;
+	while y < iH do
+		local x = 0;
+		while x < iW do
+			local i = y * iW + x + 1;
+			dist[i] = INF;
+			if IsRiverBarrierColumn(x, y) then
+				dist[i] = 0;
+				qn = qn + 1;
+				qx[qn] = x;
+				qy[qn] = y;
+			end
+			x = x + 1;
+		end
+		y = y + 1;
+	end
+	local qi = 1;
+	while qi <= qn do
+		local cx, cy = qx[qi], qy[qi];
+		local cd = dist[cy * iW + cx + 1];
+		qi = qi + 1;
+		if cd < RIVER_FRONT_ZONE then
+			local d = 0;
+			while d < DirectionTypes.NUM_DIRECTION_TYPES do
+				local adj = PlotDirNoXWrap(cx, cy, d);
+				if adj ~= nil then
+					local ax, ay = adj:GetX(), adj:GetY();
+					local ai = ay * iW + ax + 1;
+					if dist[ai] > cd + 1 then
+						dist[ai] = cd + 1;
+						qn = qn + 1;
+						qx[qn] = ax;
+						qy[qn] = ay;
+					end
+				end
+				d = d + 1;
+			end
+		end
+	end
+	return dist;
+end
+------------------------------------------------------------------------------
+-- 0 outside the front zone, else 1..RIVER_FRONT_ZONE (1 = right next to
+-- the barrier, i.e. the strongest "front-ness").
+function RiverFrontCloseness(x, y)
+	if riverFrontDist == nil or x == nil or y == nil then
+		return 0
+	end
+	local iW = Map.GetGridSize();
+	local fd = riverFrontDist[y * iW + x + 1];
+	if fd == nil or fd < 1 or fd > RIVER_FRONT_ZONE then
+		return 0
+	end
+	return RIVER_FRONT_ZONE + 1 - fd;
+end
+------------------------------------------------------------------------------
 function GetRiverValueAtPlot(plot)
 	local x = plot:GetX()
 	local y = plot:GetY()
@@ -10562,6 +10894,11 @@ function GetRiverValueAtPlot(plot)
 			direction_influence_value = direction_influence_value + wd * 3;
 		end
 	end
+	-- Front zone: a soft gradient ahead of the barrier's hard wall above.
+	-- Without it the walk only "saw" the barrier one step out, and since a
+	-- river can only turn 60 degrees per step, it would slide along the
+	-- wall N/S for half the map instead of turning away (fa3eda7).
+	direction_influence_value = direction_influence_value + RiverFrontCloseness(x, y) * 6;
 
 	local sum = ((numPlots - plot:GetPlotType()) * 20) + direction_influence_value;
 
@@ -10751,7 +11088,14 @@ function DoRiver(startPlot, thisFlowDirection, originalFlowDirection, riverID)
 						if (flowDirection == originalFlowDirection) then
 							value = (value * 3) / 4;
 						end
-						
+						-- In the front zone, straight N/S legs (the only two
+						-- truly vertical flow directions) cost extra so the
+						-- river zig-zags E/W (NE/SE/NW/SW) instead.
+						if flowDirection == FlowDirectionTypes.FLOWDIRECTION_NORTH
+							or flowDirection == FlowDirectionTypes.FLOWDIRECTION_SOUTH then
+							value = value + RiverFrontCloseness(riverPlotX, riverPlotY) * 5;
+						end
+
 						if (value < bestValue) then
 							bestValue = value;
 							bestFlowDirection = flowDirection;
@@ -11127,6 +11471,18 @@ function AddRivers()
 	print("Skirmish - Adding Rivers");
 	riverEdgeList = {};
 	riverWaterDist = BuildRiverWaterDistanceField();
+	riverFrontDist = BuildRiverFrontDistanceField();
+	-- Front-zone source thinning: none in the 2 tiles nearest the barrier,
+	-- half in the next 2. Passes 3-4 top rivers back up per landmass
+	-- (area river-edge quota), so the total mostly moves west rather than
+	-- disappearing.
+	local function frontSourceSkip(x, y)
+		local c = RiverFrontCloseness(x, y);
+		if c >= RIVER_FRONT_ZONE - 1 then
+			return true
+		end
+		return c > 0 and Map.Rand(2, "River front source thin") == 0;
+	end
 	local SplitOps = Map.GetCustomOption(OPT_CENTER_SPLIT)
 	local snowRiverSkipActive = (IsOldSnow() or IsSnowBarrier());
 	local cfgRiversSkip = GetBarrierConfig();
@@ -11222,6 +11578,8 @@ function AddRivers()
 				-- Plot in buffer zone, ignore it.
 			elseif TongueIsBarrierPlot(current_x, current_y) then
 				-- Plot in tongue barrier, ignore it.
+			elseif (not plot:IsWater()) and frontSourceSkip(current_x, current_y) then
+				-- Front zone: thinned river sources.
 			elseif (not plot:IsWater()) then
 				local peaksOk = true;
 				if peaksRivers then
@@ -11328,6 +11686,35 @@ function AddRivers()
 		end
 	end
 	OasisStripWestHinterlandRivers();
+	-- West-half river edge census: total vs front zone, and how many of the
+	-- front-zone edges are W-of-river edges (the N/S-running segments).
+	local total, front, frontNS = 0, 0, 0;
+	local cy = 0;
+	while cy < iH do
+		local cx = 0;
+		while cx < math.floor(iW / 2) do
+			local p = Map.GetPlot(cx, cy);
+			if p ~= nil then
+				local n = 0;
+				if p:IsWOfRiver() then n = n + 1; end
+				if p:IsNWOfRiver() then n = n + 1; end
+				if p:IsNEOfRiver() then n = n + 1; end
+				total = total + n;
+				if RiverFrontCloseness(cx, cy) > 0 then
+					front = front + n;
+					if p:IsWOfRiver() then frontNS = frontNS + 1; end
+				end
+			end
+			cx = cx + 1;
+		end
+		cy = cy + 1;
+	end
+	local rk = "nil";
+	if GetBarrierConfig() ~= nil then
+		rk = tostring(GetBarrierConfig().kind);
+	end
+	WeeveeDbgPersist("RIVER EDGES kind=" .. rk .. " tilted=" .. tostring(IsTiltedMirrorAxis())
+		.. " westTotal=" .. total .. " frontZone=" .. front .. " frontNS=" .. frontNS);
 end
 ------------------------------------------------------------------------------------------------------------------------------------------------------------
 function AssignStartingPlots:GenerateRegions(args)
@@ -20192,7 +20579,7 @@ function StartPlotSystem()
 	WeeveeDbgCall("EnsureMajorIronHills", EnsureMajorIronHills);
 	WeeveeDbgCall("StripFrostySnowSparseLux", StripFrostySnowSparseLux);
 	WeeveeDbgCall("EnsureLuxuryQuota", EnsureLuxuryQuota);
-	WeeveeDbgCall("EnsureStartLuxuryFloor", EnsureStartLuxuryFloor);
+	WeeveeDbgCall("EnsureStartLuxuryFloor", function() EnsureStartLuxuryFloor(start_plot_database) end);
 	WeeveeDbgCall("StripStartTileLuxuries", StripStartTileLuxuries);
 	WeeveeDbgCall("ConvertFlatDesertSaltCopper", ConvertFlatDesertSaltCopper);
 	WeeveeDbgCall("StripIllegalMountainResources", StripIllegalMountainResources);
@@ -20346,7 +20733,7 @@ function WeeveeDbgWaterCount()
 		y = y + 1;
 	end
 	local total = iW * iH;
-	local line = "WATER COUNT kind=" .. kind .. " iW=" .. iW .. " iH=" .. iH .. " total=" .. total
+	local line = "WATER COUNT kind=" .. kind .. " tilted=" .. tostring(IsTiltedMirrorAxis()) .. " iW=" .. iW .. " iH=" .. iH .. " total=" .. total
 		.. " saltWater=" .. saltWater .. " lakeWater=" .. lakeWater .. " land=" .. land
 		.. " saltWaterPct=" .. string.format("%.1f", 100 * saltWater / total);
 	WeeveeDbg(line);
